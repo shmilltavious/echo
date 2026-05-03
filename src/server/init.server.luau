@@ -1,16 +1,10 @@
 -- Server initialization script
 print("Hello world, from server!")
 
--- Use absolute paths for requires
-local MonsterAI = require(game.ServerScriptService.Server:WaitForChild("MonsterAI", 5))
-local ButtonSystem = require(game.ServerScriptService.Server:WaitForChild("ButtonSystem", 5))
-
-if not MonsterAI then
-	warn("❌ MonsterAI failed to load")
-else
-	print("✅ MonsterAI loaded")
-	MonsterAI.init()
-end
+-- MonsterAI.server.luau and MonsterSetup.server.luau are standalone Scripts
+-- that Roblox runs automatically -- requiring them here would crash since only
+-- ModuleScripts can be passed to require().
+local ButtonSystem = require(script:WaitForChild("ButtonSystem", 5))
 
 if not ButtonSystem then
 	warn("❌ ButtonSystem failed to load")
