@@ -15,6 +15,9 @@ function SphereVisuals.createLight(rootPart: BasePart): (Part, Light)
 	local part = Instance.new("Part")
 	part.Shape = Enum.PartType.Ball
 	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	part.Anchored = true
 	part.CFrame = rootPart.CFrame
 	part.TopSurface = Enum.SurfaceType.Smooth
 	part.BottomSurface = Enum.SurfaceType.Smooth
@@ -64,6 +67,23 @@ end
 function SphereVisuals.init()
 	InputHandler.init()
 	game.Players.LocalPlayer.CameraMode = Enum.CameraMode.Classic
+	
+	-- Clean up Realism Mod artifacts that clip into the character
+	local function fixCharacterParts(character)
+		local cp = character:FindFirstChild("CollisionPart")
+		if cp then cp:Destroy() end
+		
+		local hrp = character:FindFirstChild("HumanoidRootPart")
+		if hrp then hrp.Transparency = 1 end
+		
+		character.ChildAdded:Connect(function(child)
+			if child.Name == "CollisionPart" then child:Destroy() end
+		end)
+	end
+	
+	local player = game.Players.LocalPlayer
+	if player.Character then fixCharacterParts(player.Character) end
+	player.CharacterAdded:Connect(fixCharacterParts)
 	
 	RunService.RenderStepped:Connect(function()
 		SphereVisuals.updateLight()
