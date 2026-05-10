@@ -31,7 +31,7 @@ function Menu.init()
 		menuCameraPos.Transparency = 1  -- Make it fully invisible
 		menuCameraPos.Anchored = true   -- Prevent physics from moving it
 		menuCameraPos.Size = Vector3.new(1, 1, 1)  -- Force tiny size so it can't clip into anything even if found
-		menuCameraPos.CFrame = CFrame.new(-91.034, 10.966, 23.389)  -- Lock it in place
+		menuCameraPos.CFrame = CFrame.new(-91.034, 10.966, 23.389) * CFrame.Angles(0, math.rad(25), 0)  -- Lock it in place, rotated 25 degrees to the left
 		print("📸 Existing MenuCameraPos overridden at", tostring(menuCameraPos.Position))
 	else
 		-- Create the part programmatically so the camera system works
@@ -42,7 +42,7 @@ function Menu.init()
 		menuCameraPos.CanQuery = false
 		menuCameraPos.Transparency = 1
 		menuCameraPos.Size = Vector3.new(1, 1, 1)
-		menuCameraPos.CFrame = CFrame.new(-91.034, 10.966, 23.389)
+		menuCameraPos.CFrame = CFrame.new(-91.034, 10.966, 23.389) * CFrame.Angles(0, math.rad(25), 0)
 		menuCameraPos.Parent = workspace
 		
 		print("📸 MenuCameraPos created programmatically at", tostring(menuCameraPos.Position))
