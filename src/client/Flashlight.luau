@@ -7,35 +7,44 @@ local UserInputService = game:GetService("UserInputService")
 
 -- Constants
 local MAX_BATTERY = 60 -- 60 seconds of total flashlight usage
-local FULL_BRIGHTNESS = 4
-local FULL_RANGE = 20
-local SPOT_ANGLE = 45
+local FULL_BRIGHTNESS = 8
+local FULL_RANGE = 44
+local CLOSE_FILL_BRIGHTNESS = 0.75
+local CLOSE_FILL_RANGE = 12
+local SPOT_ANGLE = 58
 local DIMMING_THRESHOLD = 12 -- last 12 seconds = dimming phase
 
 -- State
 local battery = MAX_BATTERY
 local flashlightPart: Part? = nil
 local flashlightSpot: SpotLight? = nil
+local flashlightFill: PointLight? = nil
 local batteryConnection: RBXScriptConnection? = nil
 local isDead = false
 local isOn = true
-local hudLabel: TextLabel? = nil
 local hudFrame: Frame? = nil
+local hudStatus: TextLabel? = nil
+local hudBatteryText: TextLabel? = nil
+local hudBatteryFill: Frame? = nil
 
--- Create the flashlight as a SpotLight attached to the camera (follows view direction)
+local function addTextStroke(label: TextLabel, transparency: number)
+	label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+	label.TextStrokeTransparency = transparency
+end
+
+-- Create the flashlight as local lights that follow the camera.
 function Flashlight.createFlashlight(): (Part, SpotLight)
-	local camera = workspace.CurrentCamera
-
 	local part = Instance.new("Part")
 	part.Name = "Flashlight"
 	part.Shape = Enum.PartType.Block
-	part.Size = Vector3.new(0.5, 0.5, 0.5)
+	part.Size = Vector3.new(0.2, 0.2, 0.2)
 	part.Transparency = 1 -- invisible
 	part.CanCollide = false
 	part.CanQuery = false
 	part.CanTouch = false
 	part.Anchored = true
-	part.Parent = camera
+	part.CastShadow = false
+	part.Parent = workspace
 
 	local spotLight = Instance.new("SpotLight")
 	spotLight.Name = "FlashlightBeam"
@@ -46,6 +55,15 @@ function Flashlight.createFlashlight(): (Part, SpotLight)
 	spotLight.Color = Color3.fromRGB(255, 245, 220) -- Warm white
 	spotLight.Face = Enum.NormalId.Front -- Shines forward from camera
 	spotLight.Parent = part
+
+	local fillLight = Instance.new("PointLight")
+	fillLight.Name = "FlashlightCloseFill"
+	fillLight.Brightness = CLOSE_FILL_BRIGHTNESS
+	fillLight.Range = CLOSE_FILL_RANGE
+	fillLight.Shadows = false
+	fillLight.Color = Color3.fromRGB(255, 240, 210)
+	fillLight.Parent = part
+	flashlightFill = fillLight
 
 	return part, spotLight
 end
@@ -60,49 +78,133 @@ function Flashlight.createHUD()
 
 	local frame = Instance.new("Frame")
 	frame.Name = "HudFrame"
-	frame.Size = UDim2.new(0, 220, 0, 80)
-	frame.Position = UDim2.new(1, -240, 1, -100) -- bottom-right with padding
-	frame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-	frame.BackgroundTransparency = 0.5
+	frame.Size = UDim2.new(0, 252, 0, 86)
+	frame.AnchorPoint = Vector2.new(1, 1)
+	frame.Position = UDim2.new(1, -24, 1, -30)
+	frame.BackgroundTransparency = 1
 	frame.BorderSizePixel = 0
 	frame.Parent = screenGui
 
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 6)
-	corner.Parent = frame
+	local diamond = Instance.new("Frame")
+	diamond.Name = "Diamond"
+	diamond.Size = UDim2.new(0, 22, 0, 22)
+	diamond.Position = UDim2.new(0, 0, 0, 8)
+	diamond.BackgroundTransparency = 1
+	diamond.Rotation = 45
+	diamond.Parent = frame
 
-	local label = Instance.new("TextLabel")
-	label.Name = "HudText"
-	label.Size = UDim2.new(1, -10, 1, -10)
-	label.Position = UDim2.new(0, 5, 0, 5)
-	label.BackgroundTransparency = 1
-	label.TextColor3 = Color3.fromRGB(200, 200, 200)
-	label.TextSize = 14
-	label.Font = Enum.Font.GothamMedium
-	label.TextXAlignment = Enum.TextXAlignment.Right
-	label.TextYAlignment = Enum.TextYAlignment.Top
-	label.Text = ""
-	label.Parent = frame
+	local diamondStroke = Instance.new("UIStroke")
+	diamondStroke.Color = Color3.fromRGB(185, 186, 178)
+	diamondStroke.Transparency = 0.22
+	diamondStroke.Thickness = 1
+	diamondStroke.Parent = diamond
+
+	local innerDiamond = Instance.new("Frame")
+	innerDiamond.Name = "InnerDiamond"
+	innerDiamond.Size = UDim2.new(0, 10, 0, 10)
+	innerDiamond.Position = UDim2.new(0.5, -5, 0.5, -5)
+	innerDiamond.BackgroundTransparency = 1
+	innerDiamond.Parent = diamond
+
+	local innerStroke = Instance.new("UIStroke")
+	innerStroke.Color = Color3.fromRGB(126, 28, 28)
+	innerStroke.Transparency = 0.2
+	innerStroke.Thickness = 1
+	innerStroke.Parent = innerDiamond
+
+	local title = Instance.new("TextLabel")
+	title.Name = "Title"
+	title.Size = UDim2.new(1, -38, 0, 24)
+	title.Position = UDim2.new(0, 34, 0, 3)
+	title.BackgroundTransparency = 1
+	title.Font = Enum.Font.Garamond
+	title.Text = "Flashlight"
+	title.TextColor3 = Color3.fromRGB(232, 230, 220)
+	title.TextSize = 22
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.Parent = frame
+	addTextStroke(title, 0.55)
+
+	local status = Instance.new("TextLabel")
+	status.Name = "Status"
+	status.Size = UDim2.new(0, 72, 0, 20)
+	status.Position = UDim2.new(0, 34, 0, 29)
+	status.BackgroundTransparency = 1
+	status.Font = Enum.Font.GothamMedium
+	status.TextColor3 = Color3.fromRGB(198, 196, 186)
+	status.TextSize = 13
+	status.TextXAlignment = Enum.TextXAlignment.Left
+	status.TextYAlignment = Enum.TextYAlignment.Top
+	status.Parent = frame
+	addTextStroke(status, 0.68)
+
+	local hint = Instance.new("TextLabel")
+	hint.Name = "Hint"
+	hint.Size = UDim2.new(1, -112, 0, 20)
+	hint.Position = UDim2.new(0, 110, 0, 29)
+	hint.BackgroundTransparency = 1
+	hint.Font = Enum.Font.Gotham
+	hint.Text = "F Toggle"
+	hint.TextColor3 = Color3.fromRGB(150, 148, 140)
+	hint.TextSize = 12
+	hint.TextXAlignment = Enum.TextXAlignment.Left
+	hint.TextYAlignment = Enum.TextYAlignment.Top
+	hint.Parent = frame
+	addTextStroke(hint, 0.75)
+
+	local batteryTrack = Instance.new("Frame")
+	batteryTrack.Name = "BatteryTrack"
+	batteryTrack.Size = UDim2.new(1, -38, 0, 3)
+	batteryTrack.Position = UDim2.new(0, 34, 0, 57)
+	batteryTrack.BackgroundColor3 = Color3.fromRGB(72, 71, 67)
+	batteryTrack.BackgroundTransparency = 0.35
+	batteryTrack.BorderSizePixel = 0
+	batteryTrack.Parent = frame
+
+	local batteryFill = Instance.new("Frame")
+	batteryFill.Name = "BatteryFill"
+	batteryFill.Size = UDim2.new(1, 0, 1, 0)
+	batteryFill.BackgroundColor3 = Color3.fromRGB(208, 205, 190)
+	batteryFill.BorderSizePixel = 0
+	batteryFill.Parent = batteryTrack
+
+	local batteryText = Instance.new("TextLabel")
+	batteryText.Name = "Battery"
+	batteryText.Size = UDim2.new(1, -38, 0, 18)
+	batteryText.Position = UDim2.new(0, 34, 0, 64)
+	batteryText.BackgroundTransparency = 1
+	batteryText.Font = Enum.Font.Gotham
+	batteryText.TextColor3 = Color3.fromRGB(170, 168, 158)
+	batteryText.TextSize = 12
+	batteryText.TextXAlignment = Enum.TextXAlignment.Left
+	batteryText.TextYAlignment = Enum.TextYAlignment.Top
+	batteryText.Parent = frame
+	addTextStroke(batteryText, 0.75)
 
 	hudFrame = frame
-	hudLabel = label
+	hudStatus = status
+	hudBatteryText = batteryText
+	hudBatteryFill = batteryFill
 end
 
 -- Update HUD text
 function Flashlight.updateHUD()
-	if not hudLabel then return end
+	if not hudStatus or not hudBatteryText or not hudBatteryFill then return end
 
 	local batteryPercent = math.floor((battery / MAX_BATTERY) * 100)
 	local flashlightStatus = if isDead then "DEAD" else (if isOn then "ON" else "OFF")
-	local batteryColor = if batteryPercent > 30 then "255, 255, 255" else "255, 80, 80"
+	local warningColor = Color3.fromRGB(148, 42, 42)
+	local normalColor = Color3.fromRGB(198, 196, 186)
+	local dimColor = Color3.fromRGB(126, 124, 116)
+	local statusColor = if isDead then warningColor else (if isOn then normalColor else dimColor)
+	local batteryColor = if batteryPercent > 30 then Color3.fromRGB(208, 205, 190) else warningColor
 
-	hudLabel.Text = string.format(
-		"[F] Flashlight: %s\nBattery: <font color=\"rgb(%s)\">%d%%</font>\n[E] Interact",
-		flashlightStatus,
-		batteryColor,
-		batteryPercent
-	)
-	hudLabel.RichText = true
+	hudStatus.Text = flashlightStatus
+	hudStatus.TextColor3 = statusColor
+	hudBatteryText.Text = string.format("Battery  %d%%", batteryPercent)
+	hudBatteryText.TextColor3 = batteryColor
+	hudBatteryFill.Size = UDim2.new(math.clamp(battery / MAX_BATTERY, 0, 1), 0, 1, 0)
+	hudBatteryFill.BackgroundColor3 = batteryColor
 end
 
 -- Toggle flashlight on/off
@@ -113,6 +215,9 @@ function Flashlight.toggle()
 
 	if flashlightSpot then
 		flashlightSpot.Enabled = isOn
+	end
+	if flashlightFill then
+		flashlightFill.Enabled = isOn
 	end
 
 	print("🔦 Flashlight", if isOn then "ON" else "OFF")
@@ -140,9 +245,9 @@ function Flashlight.init()
 	-- Start battery depletion + HUD update + camera-sync loop (runs every frame)
 	local hudTimer = 0
 	batteryConnection = RunService.RenderStepped:Connect(function(dt)
-		-- Sync flashlight position/direction to current camera
-		if flashlightPart then
-			flashlightPart.CFrame = workspace.CurrentCamera.CFrame
+		local camera = workspace.CurrentCamera
+		if flashlightPart and camera then
+			flashlightPart.CFrame = camera.CFrame * CFrame.new(0.35, -0.2, -0.85)
 		end
 
 		Flashlight.updateBattery(dt)
@@ -171,8 +276,22 @@ function Flashlight.updateBattery(dt: number)
 			local ratio = math.max(0, battery / DIMMING_THRESHOLD)
 			flashlightSpot.Brightness = FULL_BRIGHTNESS * ratio
 			flashlightSpot.Range = (FULL_RANGE * 0.5) + (FULL_RANGE * 0.5 * ratio)
+			if flashlightFill then
+				flashlightFill.Brightness = CLOSE_FILL_BRIGHTNESS * ratio
+				flashlightFill.Range = (CLOSE_FILL_RANGE * 0.55) + (CLOSE_FILL_RANGE * 0.45 * ratio)
+			end
+		elseif battery > 0 then
+			flashlightSpot.Brightness = FULL_BRIGHTNESS
+			flashlightSpot.Range = FULL_RANGE
+			if flashlightFill then
+				flashlightFill.Brightness = CLOSE_FILL_BRIGHTNESS
+				flashlightFill.Range = CLOSE_FILL_RANGE
+			end
 		elseif battery <= 0 then
 			flashlightSpot.Enabled = false
+			if flashlightFill then
+				flashlightFill.Enabled = false
+			end
 			isDead = true
 			isOn = false
 			Flashlight.updateHUD()
@@ -191,12 +310,15 @@ function Flashlight.destroy()
 		flashlightPart:Destroy()
 		flashlightPart = nil
 		flashlightSpot = nil
+		flashlightFill = nil
 	end
 	if hudFrame then
 		hudFrame.Parent = nil
 		hudFrame:Destroy()
 		hudFrame = nil
-		hudLabel = nil
+		hudStatus = nil
+		hudBatteryText = nil
+		hudBatteryFill = nil
 	end
 end
 

@@ -1,29 +1,50 @@
 -- Client initialization script
 print("Hello world, from client!")
 
--- Use absolute paths for requires
-local Menu = require(game.StarterPlayer.StarterPlayerScripts.Client:WaitForChild("Menu", 5))
-local SphereVisuals = require(game.StarterPlayer.StarterPlayerScripts.Client:WaitForChild("SphereVisuals", 5))
-local ButtonPrompt = require(game.StarterPlayer.StarterPlayerScripts.Client:WaitForChild("ButtonPrompt", 5))
-local Flashlight = require(game.StarterPlayer.StarterPlayerScripts.Client:WaitForChild("Flashlight", 5))
+local StarterGui = game:GetService("StarterGui")
+local clientFolder = game.StarterPlayer.StarterPlayerScripts.Client
+local Menu = require(clientFolder:WaitForChild("Menu", 5))
+local SphereVisuals = require(clientFolder:WaitForChild("SphereVisuals", 5))
+local ObjectiveClient = require(clientFolder:WaitForChild("ObjectiveClient", 5))
+local CameraEffects = require(clientFolder:WaitForChild("CameraEffects", 5))
+
+local function hidePlayerList()
+	pcall(function()
+		StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.PlayerList, false)
+	end)
+end
+
+hidePlayerList()
+task.spawn(function()
+	for _ = 1, 5 do
+		task.wait(0.5)
+		hidePlayerList()
+	end
+end)
 
 if not Menu then
-	warn("❌ Menu failed to load")
+	warn("Menu failed to load")
 else
-	print("✅ Menu loaded")
+	print("Menu loaded")
 	Menu.init()
 end
 
 if not SphereVisuals then
-	warn("❌ SphereVisuals failed to load")
+	warn("SphereVisuals failed to load")
 else
-	print("✅ SphereVisuals loaded")
+	print("SphereVisuals loaded")
 end
 
-if not ButtonPrompt then
-	warn("❌ ButtonPrompt failed to load")
+if not ObjectiveClient then
+	warn("ObjectiveClient failed to load")
 else
-	print("✅ ButtonPrompt loaded")
+	print("ObjectiveClient loaded")
+end
+
+if not CameraEffects then
+	warn("CameraEffects failed to load")
+else
+	print("CameraEffects loaded")
 end
 
 print("MVP client systems initialized!")
