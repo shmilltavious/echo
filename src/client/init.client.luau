@@ -5,6 +5,7 @@ print("Hello world, from client!")
 local Menu = require(game.StarterPlayer.StarterPlayerScripts.Client:WaitForChild("Menu", 5))
 local SphereVisuals = require(game.StarterPlayer.StarterPlayerScripts.Client:WaitForChild("SphereVisuals", 5))
 local ButtonPrompt = require(game.StarterPlayer.StarterPlayerScripts.Client:WaitForChild("ButtonPrompt", 5))
+local Flashlight = require(game.StarterPlayer.StarterPlayerScripts.Client:WaitForChild("Flashlight", 5))
 
 if not Menu then
 	warn("❌ Menu failed to load")

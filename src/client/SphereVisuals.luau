@@ -7,11 +7,11 @@ local SphereDetection = require(game.ReplicatedStorage.Shared.SphereDetection)
 local InputHandler = require(script.Parent.InputHandler)
 
 -- State
-local lightPart: Part
-local activeLight: Light
+local lightPart: Part? = nil
+local activeLight: PointLight? = nil
 
 -- Create the echolocation light
-function SphereVisuals.createLight(rootPart: BasePart): (Part, Light)
+function SphereVisuals.createLight(rootPart: BasePart): (Part, PointLight)
 	local part = Instance.new("Part")
 	part.Shape = Enum.PartType.Ball
 	part.CanCollide = false
@@ -43,8 +43,15 @@ function SphereVisuals.updateLight()
 
 	if not lightPart then
 		lightPart, activeLight = SphereVisuals.createLight(rootPart)
-		print("💡 Light created at", lightPart.Position)
+		if lightPart then
+			print("💡 Light created at", lightPart.Position)
+		end
 	end
+	
+	-- Guard for Luau type narrowing — these are always set by the block above
+	local lp = lightPart
+	local al = activeLight
+	if not lp or not al then return end
 	
 	local movementSpeed = InputHandler.getMovementSpeed()
 	local micVolume = InputHandler.getMicVolume()
@@ -53,20 +60,29 @@ function SphereVisuals.updateLight()
 	local soundRadius = SphereDetection.calculateSphereRadius(movementSpeed, micVolume, Constants)
 	
 	-- Update light position
-	lightPart.Position = rootPart.Position + Vector3.new(0, 2, 0) -- Move slightly up to eye level
+	lp.Position = rootPart.Position + Vector3.new(0, 2, 0) -- Move slightly up to eye level
 	
 	-- Scale light brightness and range with sound intensity
 	local totalSound = (movementSpeed / 16 * 0.1) + (micVolume * 20)
-	activeLight.Range = soundRadius
-	activeLight.Brightness = math.clamp(totalSound, 0, Constants.MAX_BRIGHTNESS) 
+	al.Range = soundRadius
+	al.Brightness = math.clamp(totalSound, 0, Constants.MAX_BRIGHTNESS)
 	
-	print("Movement:", movementSpeed, "| Mic:", micVolume, "| Range:", soundRadius, "| Brightness:", activeLight.Brightness)
+	-- Only log periodically to reduce spam
+	-- print("Movement:", movementSpeed, "| Mic:", micVolume, "| Range:", soundRadius, "| Brightness:", activeLight.Brightness)
 end
 
 -- Initialize the system
 function SphereVisuals.init()
 	InputHandler.init()
-	game.Players.LocalPlayer.CameraMode = Enum.CameraMode.Classic
+	
+	-- Force permanent first-person camera (no toggle, always locked)
+	local player = game.Players.LocalPlayer
+	player.CameraMode = Enum.CameraMode.LockFirstPerson
+	print("🎯 Player locked into first-person mode")
+	
+	-- Initialize flashlight (battery-powered spotlight, togglable with F key)
+	local Flashlight = require(script.Parent.Flashlight)
+	Flashlight.init()
 	
 	-- Clean up Realism Mod artifacts that clip into the character
 	local function fixCharacterParts(character)
@@ -81,7 +97,6 @@ function SphereVisuals.init()
 		end)
 	end
 	
-	local player = game.Players.LocalPlayer
 	if player.Character then fixCharacterParts(player.Character) end
 	player.CharacterAdded:Connect(fixCharacterParts)
 	
