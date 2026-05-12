@@ -4,13 +4,13 @@ print("Hello world, from server!")
 -- MonsterAI.server.luau and MonsterSetup.server.luau are standalone Scripts
 -- that Roblox runs automatically -- requiring them here would crash since only
 -- ModuleScripts can be passed to require().
-local ButtonSystem = require(script:WaitForChild("ButtonSystem", 5))
+local ObjectiveSystem = require(script:WaitForChild("ObjectiveSystem", 5))
 
-if not ButtonSystem then
-	warn("❌ ButtonSystem failed to load")
+if not ObjectiveSystem then
+	warn("ObjectiveSystem failed to load")
 else
-	print("✅ ButtonSystem loaded")
-	ButtonSystem.init()
+	print("ObjectiveSystem loaded")
+	ObjectiveSystem.init()
 end
 
 print("MVP server systems initialized!")

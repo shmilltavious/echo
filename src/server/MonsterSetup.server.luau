@@ -1,7 +1,7 @@
 -- R15 rig — Motor6D joints already connect every limb, so NO welds needed here.
 -- Adding WeldConstraints on top of Motor6Ds over-constrains the rig and causes
 -- it to fall over or slide sideways.
-local monsterModel = workspace:WaitForChild("Rig")
+local monsterModel = workspace:FindFirstChild("Monster") or workspace:WaitForChild("Rig")
 local rootPart = monsterModel:WaitForChild("HumanoidRootPart")
 local humanoid = monsterModel:WaitForChild("Humanoid")
 

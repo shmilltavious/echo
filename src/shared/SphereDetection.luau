@@ -28,10 +28,23 @@ function SphereDetection.getWallsTouchedBySphere(sphereCenter: Vector3, sphereRa
 	return touchedWalls
 end
 
+function SphereDetection.getPartsTouchedBySphere(sphereCenter: Vector3, sphereRadius: number, parts: {BasePart}): {BasePart}
+	local touchedParts = {}
+
+	for _, part in ipairs(parts) do
+		local distance = (part.Position - sphereCenter).Magnitude
+		if distance <= (sphereRadius + part.Size.Magnitude / 2) then
+			table.insert(touchedParts, part)
+		end
+	end
+
+	return touchedParts
+end
+
 -- Calculate sphere radius based on movement speed and mic volume
 function SphereDetection.calculateSphereRadius(movementSpeed: number, micVolume: number, constants: {any}): number
-	local speedInfluence = movementSpeed * constants.SPEED_TO_RADIUS_MULTIPLIER
-	local volumeInfluence = micVolume * constants.MIC_VOLUME_TO_RADIUS_MULTIPLIER
+	local speedInfluence = movementSpeed * 0.2
+	local volumeInfluence = micVolume * 55
 	local totalRadius = constants.SPHERE_MIN_RADIUS + speedInfluence + volumeInfluence
 	
 	return math.min(totalRadius, constants.SPHERE_MAX_RADIUS)
