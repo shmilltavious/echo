@@ -222,7 +222,9 @@ local function catchPlayer(player)
 	end
 
 	caughtCooldowns[player] = now
-	caughtEvent:FireClient(player)
+	caughtEvent:FireClient(player, {
+		outcome = "death",
+	})
 
 	local character = player.Character
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")

@@ -12,11 +12,13 @@ local character = player.Character or player.CharacterAdded:Wait()
 local menuGui: ScreenGui? = nil
 local inMenu = true
 local menuCameraConnection: RBXScriptConnection? = nil
+local hiddenPartState = {}
 
 local SphereVisuals = nil
 local ObjectiveClient = nil
 local CameraEffects = nil
 local MonsterFeedback = nil
+local AudioFeedback = nil
 
 local MENU_CAMERA_CFRAME =
 	CFrame.new(-91.034, 10.966, 23.389)
@@ -98,8 +100,13 @@ end
 function Menu.hideCharacter()
 	if not character then return end
 
+	table.clear(hiddenPartState)
 	for _, part in pairs(character:GetDescendants()) do
 		if part:IsA("BasePart") then
+			hiddenPartState[part] = {
+				canCollide = part.CanCollide,
+				transparency = part.Transparency,
+			}
 			part.CanCollide = false
 			part.Transparency = 1
 		end
@@ -275,6 +282,18 @@ function Menu.startGame()
 		end)
 	end
 
+	if not AudioFeedback then
+		local module = getClientModule("AudioFeedback")
+		if module then
+			AudioFeedback = require(module)
+		end
+	end
+	if AudioFeedback then
+		task.spawn(function()
+			AudioFeedback.init()
+		end)
+	end
+
 	inMenu = false
 	print("Game started")
 end
@@ -284,8 +303,9 @@ function Menu.showCharacter()
 
 	for _, part in pairs(character:GetDescendants()) do
 		if part:IsA("BasePart") then
-			part.Transparency = 0
-			part.CanCollide = true
+			local state = hiddenPartState[part]
+			part.Transparency = if state then state.transparency else 0
+			part.CanCollide = if state then state.canCollide else part.CanCollide
 		end
 	end
 end

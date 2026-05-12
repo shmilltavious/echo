@@ -17,9 +17,34 @@ local edgeFrames = {}
 local overlayPulse = 0
 
 local NOISE_THRESHOLD = 0.1
-local REVEAL_TRANSPARENCY = 0.28
+local REVEAL_TRANSPARENCY = 0.34
+local OBJECTIVE_REVEAL_TRANSPARENCY = 0.14
 
 local REVEAL_TAGS = { "EcholocationReveal", "RevealTarget" }
+
+local objectiveColors = {
+	Keycard = Color3.fromRGB(95, 210, 255),
+	Fuse = Color3.fromRGB(255, 214, 92),
+	RepairPanel = Color3.fromRGB(115, 255, 170),
+	EscapeDoor = Color3.fromRGB(210, 210, 230),
+	DecoyBottle = Color3.fromRGB(130, 235, 225),
+	AudioLandmark = Color3.fromRGB(255, 140, 66),
+}
+
+local function getRevealColor(part: BasePart): Color3
+	local objectiveName = part:GetAttribute("ObjectiveName")
+	if typeof(objectiveName) == "string" and objectiveColors[objectiveName] then
+		return objectiveColors[objectiveName]
+	end
+
+	return Color3.fromRGB(150, 220, 255)
+end
+
+local function isObjectiveLike(part: BasePart): boolean
+	return part:GetAttribute("ObjectiveName") ~= nil
+		or part:GetAttribute("EquipSlot") ~= nil
+		or part.Name:find("Interact") ~= nil
+end
 
 local function createSensoryOverlay()
 	local playerGui = game.Players.LocalPlayer:WaitForChild("PlayerGui")
@@ -130,10 +155,13 @@ function SphereVisuals.revealTouchedParts(center: Vector3, radius: number, noise
 		touchedParts = SphereDetection.getWallsTouchedBySphere(center, radius, revealFolder)
 	end
 
-	local targetTransparency = math.clamp(REVEAL_TRANSPARENCY - (noiseIntensity * 0.02), 0.05, REVEAL_TRANSPARENCY)
-
 	for _, part in ipairs(touchedParts) do
 		if part.Name ~= "Baseplate" then
+			local revealColor = getRevealColor(part)
+			local targetTransparency = if isObjectiveLike(part)
+				then OBJECTIVE_REVEAL_TRANSPARENCY
+				else math.clamp(REVEAL_TRANSPARENCY - (noiseIntensity * 0.018), 0.2, REVEAL_TRANSPARENCY)
+
 			local data = revealedParts[part]
 			if not data then
 				data = {
@@ -148,9 +176,10 @@ function SphereVisuals.revealTouchedParts(center: Vector3, radius: number, noise
 				highlight.Name = "EcholocationOutline"
 				highlight.Adornee = part
 				highlight.DepthMode = Enum.HighlightDepthMode.Occluded
-				highlight.FillTransparency = 1
-				highlight.OutlineColor = Color3.fromRGB(155, 220, 255)
-				highlight.OutlineTransparency = 0.18
+				highlight.FillColor = revealColor
+				highlight.FillTransparency = if isObjectiveLike(part) then 0.82 else 0.94
+				highlight.OutlineColor = revealColor
+				highlight.OutlineTransparency = if isObjectiveLike(part) then 0.02 else 0.07
 				highlight.Parent = part
 				data.highlight = highlight
 				revealedParts[part] = data
@@ -159,12 +188,12 @@ function SphereVisuals.revealTouchedParts(center: Vector3, radius: number, noise
 			data.revealTransparency = math.min(data.revealTransparency, targetTransparency)
 			data.lastSeen = now
 			part.Transparency = data.revealTransparency
-			part.Color = data.originalColor:Lerp(Color3.fromRGB(145, 215, 245), math.clamp(noiseIntensity * 0.08, 0.16, 0.42))
-			if noiseIntensity > 0.6 then
-				part.Material = Enum.Material.Neon
-			end
+			part.Color = data.originalColor:Lerp(revealColor, math.clamp(noiseIntensity * 0.1, 0.22, 0.48))
 			if data.highlight then
-				data.highlight.OutlineTransparency = 0.18
+				data.highlight.FillColor = revealColor
+				data.highlight.OutlineColor = revealColor
+				data.highlight.FillTransparency = if isObjectiveLike(part) then 0.82 else 0.94
+				data.highlight.OutlineTransparency = if isObjectiveLike(part) then 0.02 else 0.07
 			end
 		end
 	end
@@ -271,15 +300,21 @@ function SphereVisuals.init()
 	Flashlight.init()
 
 	local function fixCharacterParts(characterToFix)
+		local function keepCollisionPartInvisible(instance)
+			if instance.Name == "CollisionPart" and instance:IsA("BasePart") then
+				instance.Transparency = 1
+				instance.CanCollide = true
+				instance.CanQuery = false
+			end
+		end
+
 		local cp = characterToFix:FindFirstChild("CollisionPart")
-		if cp then cp:Destroy() end
+		if cp then keepCollisionPartInvisible(cp) end
 
 		local hrp = characterToFix:FindFirstChild("HumanoidRootPart")
 		if hrp then hrp.Transparency = 1 end
 
-		characterToFix.ChildAdded:Connect(function(child)
-			if child.Name == "CollisionPart" then child:Destroy() end
-		end)
+		characterToFix.ChildAdded:Connect(keepCollisionPartInvisible)
 	end
 
 	if player.Character then fixCharacterParts(player.Character) end

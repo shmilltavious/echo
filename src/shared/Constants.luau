@@ -3,9 +3,9 @@ local Constants = {}
 
 -- Sphere mechanics
 Constants.SPHERE_MIN_RADIUS = 5
-Constants.SPHERE_MAX_RADIUS = 80
+Constants.SPHERE_MAX_RADIUS = 48
 Constants.SPHERE_SCALE_SPEED = 0.15 -- units per second
-Constants.MAX_BRIGHTNESS = 2.5 -- Lower ceiling to prevent blinding and light leaking
+Constants.MAX_BRIGHTNESS = 1.8 -- Lower ceiling to prevent blinding and light leaking
 
 -- Echolocation noise tiers
 Constants.MOVEMENT_NOISE = {
@@ -28,21 +28,21 @@ Constants.MOVEMENT_NOISE = {
 	},
 	sprint = {
 		intensity = 1.1,
-		radius = 30,
+		radius = 24,
 		monsterRisk = 1.25,
 		walkSpeed = 20,
 	},
 	jump = {
 		intensity = 1.45,
-		radius = 36,
+		radius = 28,
 		monsterRisk = 1.6,
 		duration = 0.45,
 	},
 }
 
 Constants.VOICE_NOISE = {
-	intensityMultiplier = 4,
-	radiusMultiplier = 55,
+	intensityMultiplier = 3.2,
+	radiusMultiplier = 30,
 	monsterRiskMultiplier = 1.3,
 }
 

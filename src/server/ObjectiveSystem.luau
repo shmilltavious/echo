@@ -8,6 +8,12 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local OBJECTIVE_TAG = "Objective"
 local REVEAL_TAG = "EcholocationReveal"
 local INTERACT_RANGE = 16
+local SOUND_IDS = {
+	pickup = "rbxassetid://9112854440",
+	panelRepair = "rbxassetid://9112854440",
+	escapeSuccess = "rbxassetid://9112854440",
+	decoyImpact = "rbxassetid://9113420772",
+}
 
 local objectiveOrder = {
 	Keycard = 1,
@@ -39,6 +45,10 @@ local decoyThrowEvent = ReplicatedStorage:FindFirstChild("DecoyThrow") or Instan
 decoyThrowEvent.Name = "DecoyThrow"
 decoyThrowEvent.Parent = ReplicatedStorage
 
+local gameOutcomeEvent = ReplicatedStorage:FindFirstChild("GameOutcome") or Instance.new("RemoteEvent")
+gameOutcomeEvent.Name = "GameOutcome"
+gameOutcomeEvent.Parent = ReplicatedStorage
+
 local serverNoiseEvent = ReplicatedStorage:FindFirstChild("ServerNoiseEvent") or Instance.new("BindableEvent")
 serverNoiseEvent.Name = "ServerNoiseEvent"
 serverNoiseEvent.Parent = ReplicatedStorage
@@ -52,10 +62,29 @@ local function getPlayerState(player)
 			repaired = false,
 			escaped = false,
 			decoys = 0,
+			startedAt = os.clock(),
 		}
 		playerState[player] = state
 	end
 	return state
+end
+
+local function playWorldSound(parent: Instance, name: string, soundId: string, volume: number, maxDistance: number)
+	local sound = Instance.new("Sound")
+	sound.Name = name
+	sound.SoundId = soundId
+	sound.Volume = volume
+	sound.RollOffMaxDistance = maxDistance
+	sound.RollOffMinDistance = 6
+	sound.Parent = parent
+	sound:Play()
+	Debris:AddItem(sound, 6)
+end
+
+local function getSurvivalStats(state)
+	local survivedTime = math.max(0, os.clock() - (state.startedAt or os.clock()))
+	local score = math.floor(500 + (survivedTime * 12))
+	return survivedTime, score
 end
 
 local function ensureMap()
@@ -69,13 +98,13 @@ local function ensureMap()
 end
 
 local function makePart(parent, name, position, size, color, material, legacyName)
-	local existing = parent:FindFirstChild(name)
+	local existing = parent:FindFirstChild(name, true) or workspace:FindFirstChild(name, true)
 	if existing and existing:IsA("BasePart") then
 		return existing
 	end
 
 	if legacyName then
-		local legacy = parent:FindFirstChild(legacyName)
+		local legacy = parent:FindFirstChild(legacyName, true) or workspace:FindFirstChild(legacyName, true)
 		if legacy and legacy:IsA("BasePart") then
 			legacy.Name = name
 			return legacy
@@ -137,7 +166,6 @@ local function ensureObjectiveProps()
 	keycard.CanCollide = false
 	fuse.CanCollide = false
 	decoy.CanCollide = false
-	repairPanel.CFrame = CFrame.new(repairPanel.Position) * CFrame.Angles(0, math.rad(90), 0)
 	escapeDoor:SetAttribute("ClosedPosition", escapeDoor.Position)
 	escapeDoor:SetAttribute("OpenPosition", escapeDoor.Position + Vector3.new(0, 12, 0))
 
@@ -202,6 +230,7 @@ local function interact(player, objectiveName)
 	if objectiveName == "Keycard" then
 		if state.hasKeycard then return end
 		state.hasKeycard = true
+		playWorldSound(part, "ObjectivePickup", SOUND_IDS.pickup, 0.45, 45)
 		setCollected(part)
 		sendStatus(player, "Find the fuse.", "main")
 		sendStatus(player, "Keycard acquired.", "sub")
@@ -212,6 +241,7 @@ local function interact(player, objectiveName)
 		end
 		if state.hasFuse then return end
 		state.hasFuse = true
+		playWorldSound(part, "ObjectivePickup", SOUND_IDS.pickup, 0.45, 45)
 		setCollected(part)
 		sendStatus(player, "Restore power at the repair panel.", "main")
 		sendStatus(player, "Fuse acquired.", "sub")
@@ -223,6 +253,7 @@ local function interact(player, objectiveName)
 		if state.repaired then return end
 		state.repaired = true
 		part.Color = Color3.fromRGB(80, 255, 140)
+		playWorldSound(part, "PanelRepair", SOUND_IDS.panelRepair, 0.75, 65)
 		sendStatus(player, "Reach the escape door.", "main")
 		sendStatus(player, "Power restored.", "sub")
 	elseif objectiveName == "EscapeDoor" then
@@ -234,10 +265,18 @@ local function interact(player, objectiveName)
 		state.escaped = true
 		part.Position = part:GetAttribute("OpenPosition") or (part.Position + Vector3.new(0, 12, 0))
 		part.CanCollide = false
+		playWorldSound(part, "EscapeSuccess", SOUND_IDS.escapeSuccess, 0.85, 90)
+		local survivedTime, score = getSurvivalStats(state)
+		gameOutcomeEvent:FireClient(player, {
+			outcome = "win",
+			survivedTime = survivedTime,
+			score = score,
+		})
 		sendStatus(player, "Escape route open.", "main")
 		sendStatus(player, "You survived the prototype.", "sub")
 	elseif objectiveName == "DecoyBottle" then
 		state.decoys += 1
+		playWorldSound(part, "ObjectivePickup", SOUND_IDS.pickup, 0.4, 45)
 		setCollected(part)
 		sendStatus(player, "Decoy bottle acquired. Press G to throw it.", "sub")
 	end
@@ -278,7 +317,7 @@ local function throwDecoy(player, origin, direction)
 
 	local sound = Instance.new("Sound")
 	sound.Name = "DecoyClatter"
-	sound.SoundId = "rbxassetid://9113420772"
+	sound.SoundId = SOUND_IDS.decoyImpact
 	sound.Volume = 1.1
 	sound.RollOffMaxDistance = 120
 	sound.Parent = bottle

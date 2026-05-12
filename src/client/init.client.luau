@@ -7,6 +7,7 @@ local Menu = require(clientFolder:WaitForChild("Menu", 5))
 local SphereVisuals = require(clientFolder:WaitForChild("SphereVisuals", 5))
 local ObjectiveClient = require(clientFolder:WaitForChild("ObjectiveClient", 5))
 local CameraEffects = require(clientFolder:WaitForChild("CameraEffects", 5))
+local AudioFeedback = require(clientFolder:WaitForChild("AudioFeedback", 5))
 
 local function hidePlayerList()
 	pcall(function()
@@ -45,6 +46,12 @@ if not CameraEffects then
 	warn("CameraEffects failed to load")
 else
 	print("CameraEffects loaded")
+end
+
+if not AudioFeedback then
+	warn("AudioFeedback failed to load")
+else
+	print("AudioFeedback loaded")
 end
 
 print("MVP client systems initialized!")

@@ -120,8 +120,8 @@ local function updatePulseSphere(rootPart: BasePart)
 
 		local light = activePulseSphere:FindFirstChild("PulseLight")
 		if light then
-			light.Range = currentNoise.radius * 1.5
-			light.Brightness = math.clamp((currentNoise.monsterRisk * 0.25), 0, Constants.MAX_BRIGHTNESS)
+			light.Range = currentNoise.radius * 1.1
+			light.Brightness = math.clamp((currentNoise.monsterRisk * 0.2), 0, Constants.MAX_BRIGHTNESS)
 		end
 	elseif activePulseSphere then
 		activePulseSphere.Size = activePulseSphere.Size:Lerp(Vector3.new(0, 0, 0), 0.2)
