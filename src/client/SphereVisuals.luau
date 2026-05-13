@@ -28,6 +28,7 @@ local REMOTE_PULSE_FADE_TIME = 0.5
 local REMOTE_PULSE_HEIGHT = 2
 
 local REVEAL_TAGS = { "EcholocationReveal", "RevealTarget" }
+local AUTHORED_MAP_NAMES = { "Spaceship_Map", "Map" }
 
 local objectiveColors = {
 	Keycard = Color3.fromRGB(95, 210, 255),
@@ -61,6 +62,25 @@ local function isCollected(part: BasePart): boolean
 	local current = part.Parent
 	while current and current ~= workspace do
 		if current:GetAttribute("Collected") then
+			return true
+		end
+		current = current.Parent
+	end
+
+	return false
+end
+
+local function isRevealHidden(part: BasePart): boolean
+	if part:GetAttribute("EcholocationRevealHidden") == true
+		or part.CanQuery == false
+		or part.Transparency >= 0.98
+	then
+		return true
+	end
+
+	local current = part.Parent
+	while current and current ~= workspace do
+		if current:GetAttribute("EcholocationRevealHidden") == true then
 			return true
 		end
 		current = current.Parent
@@ -205,6 +225,13 @@ local function getTaggedRevealParts(): {BasePart}
 end
 
 local function getFallbackRevealFolder(): Instance?
+	for _, mapName in ipairs(AUTHORED_MAP_NAMES) do
+		local map = workspace:FindFirstChild(mapName)
+		if map then
+			return map:FindFirstChild("RevealTargets", true) or map
+		end
+	end
+
 	return workspace:FindFirstChild("RevealTargets")
 		or workspace:FindFirstChild("Walls")
 		or workspace:FindFirstChild("Prototype_Map")
@@ -271,7 +298,7 @@ function SphereVisuals.revealTouchedParts(center: Vector3, radius: number, noise
 
 	for _, part in ipairs(touchedParts) do
 		if part.Name ~= "Baseplate" then
-			if isCollected(part) then
+			if isCollected(part) or isRevealHidden(part) then
 				clearReveal(part, revealedParts[part])
 				continue
 			end
@@ -333,6 +360,10 @@ function SphereVisuals.fadeRevealedParts()
 			continue
 		end
 		if isCollected(part) then
+			clearReveal(part, data)
+			continue
+		end
+		if isRevealHidden(part) then
 			clearReveal(part, data)
 			continue
 		end

@@ -7,10 +7,13 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 
+local Flashlight = require(script.Parent.Flashlight)
+
 local player = Players.LocalPlayer
 local objectiveEvent = ReplicatedStorage:WaitForChild("ObjectiveInteract", 10)
 local objectiveStatusEvent = ReplicatedStorage:WaitForChild("ObjectiveStatus", 10)
 local decoyThrowEvent = ReplicatedStorage:WaitForChild("DecoyThrow", 10)
+local inventoryEvent = ReplicatedStorage:WaitForChild("InventoryUpdate", 10)
 
 local initialized = false
 local nearestObjective: BasePart? = nil
@@ -22,12 +25,24 @@ local statusFrame: Frame? = nil
 local statusHeader: TextLabel? = nil
 local statusLabel: TextLabel? = nil
 local subStatusLabel: TextLabel? = nil
+local repairProgressFrame: Frame? = nil
+local repairProgressFill: Frame? = nil
 local statusHideAt = 0
 local subStatusHideAt = 0
+local isRepairHolding = false
+local repairStartAt = 0
+local repairTarget: BasePart? = nil
+local hasDecoyBottle = false
+local decoyViewModel: Model? = nil
+local decoyViewTemplate: Model? = nil
 
 local PROMPT_RANGE = 16
 local PROMPT_FADE_START = 9
 local PROMPT_BASE_SIZE = Vector2.new(230, 58)
+local REPAIR_PROGRESS_GAP = 16
+local REPAIR_DURATION = 3
+local DECOY_VIEWMODEL_OFFSET = CFrame.new(0.72, -0.82, -1.2) * CFrame.Angles(math.rad(-12), math.rad(36), math.rad(-18))
+local DECOY_VIEWMODEL_SCALE = 0.32
 
 local objectiveCopy = {
 	Keycard = {
@@ -216,6 +231,54 @@ local function createStatus(screenGui: ScreenGui)
 	subStatusLabel = subLabel
 end
 
+local function createRepairProgress(screenGui: ScreenGui)
+	local frame = Instance.new("Frame")
+	frame.Name = "RepairProgress"
+	frame.Size = UDim2.fromOffset(42, 42)
+	frame.AnchorPoint = Vector2.new(0.5, 0.5)
+	frame.BackgroundTransparency = 1
+	frame.Visible = false
+	frame.Parent = screenGui
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(1, 0)
+	corner.Parent = frame
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(238, 238, 228)
+	stroke.Transparency = 0.08
+	stroke.Thickness = 2
+	stroke.Parent = frame
+
+	local fill = Instance.new("Frame")
+	fill.Name = "Fill"
+	fill.AnchorPoint = Vector2.new(0.5, 0.5)
+	fill.Position = UDim2.fromScale(0.5, 0.5)
+	fill.Size = UDim2.fromScale(0, 0)
+	fill.BackgroundColor3 = Color3.fromRGB(238, 238, 228)
+	fill.BackgroundTransparency = 0.22
+	fill.BorderSizePixel = 0
+	fill.Parent = frame
+
+	local fillCorner = Instance.new("UICorner")
+	fillCorner.CornerRadius = UDim.new(1, 0)
+	fillCorner.Parent = fill
+
+	local keyText = Instance.new("TextLabel")
+	keyText.Name = "KeyText"
+	keyText.Size = UDim2.fromScale(1, 1)
+	keyText.BackgroundTransparency = 1
+	keyText.Font = Enum.Font.GothamMedium
+	keyText.Text = "E"
+	keyText.TextColor3 = Color3.fromRGB(18, 18, 16)
+	keyText.TextSize = 14
+	keyText.TextStrokeTransparency = 1
+	keyText.Parent = frame
+
+	repairProgressFrame = frame
+	repairProgressFill = fill
+end
+
 local function createGui()
 	local playerGui = player:WaitForChild("PlayerGui")
 	local screenGui = Instance.new("ScreenGui")
@@ -225,6 +288,7 @@ local function createGui()
 
 	createPrompt(screenGui)
 	createStatus(screenGui)
+	createRepairProgress(screenGui)
 end
 
 local function getCharacterRoot(): BasePart?
@@ -274,6 +338,184 @@ end
 local function getPromptWorldPosition(part: BasePart): Vector3
 	local yOffset = math.clamp(part.Size.Y * 0.5 + 1.2, 1.5, 5)
 	return part.Position + Vector3.new(0, yOffset, 0)
+end
+
+local function getObjectiveName(part: BasePart?): string?
+	if not part then return nil end
+	return part:GetAttribute("ObjectiveName") or part.Name
+end
+
+local function prepareHeldBottlePart(part: BasePart)
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanTouch = false
+	part.CanQuery = false
+	part.CastShadow = false
+	part.Massless = true
+end
+
+local function prepareHeldBottleModel(model: Model)
+	for _, descendant in ipairs(model:GetDescendants()) do
+		if descendant.Name == "DecoyBottleInteract" then
+			descendant:Destroy()
+		elseif descendant:IsA("BasePart") then
+			prepareHeldBottlePart(descendant)
+		elseif descendant:IsA("Script") or descendant:IsA("LocalScript") then
+			descendant:Destroy()
+		end
+	end
+end
+
+local function findDecoyBottleSource(): Model?
+	local templateRoot = ReplicatedStorage:FindFirstChild("ItemTemplates")
+	local template = templateRoot and templateRoot:FindFirstChild("DecoyBottle", true)
+	if template and template:IsA("Model") then
+		return template
+	end
+	if templateRoot then
+		for _, descendant in ipairs(templateRoot:GetDescendants()) do
+			if descendant:IsA("Model") and descendant:GetAttribute("ObjectiveName") == "DecoyBottle" then
+				return descendant
+			end
+		end
+	end
+
+	local named = workspace:FindFirstChild("DecoyBottle", true)
+	if named and named:IsA("Model") then
+		return named
+	end
+
+	for _, descendant in ipairs(workspace:GetDescendants()) do
+		if descendant:IsA("Model") and descendant:GetAttribute("ObjectiveName") == "DecoyBottle" then
+			return descendant
+		end
+	end
+
+	return nil
+end
+
+local function cacheHeldDecoyTemplate()
+	if decoyViewTemplate then return end
+
+	local source = findDecoyBottleSource()
+	if not source then
+		return
+	end
+
+	local template = Instance.new("Model")
+	template.Name = "HeldDecoyBottleTemplate"
+	for _, child in ipairs(source:GetChildren()) do
+		if child.Name ~= "DecoyBottleInteract" then
+			local clone = child:Clone()
+			clone.Parent = template
+		end
+	end
+	prepareHeldBottleModel(template)
+	if #template:GetChildren() == 0 then
+		template:Destroy()
+		return
+	end
+	template.Parent = nil
+	decoyViewTemplate = template
+end
+
+local function createHeldDecoyBottle()
+	if decoyViewModel then return end
+
+	cacheHeldDecoyTemplate()
+	if not decoyViewTemplate then return end
+
+	local camera = workspace.CurrentCamera
+	local model = decoyViewTemplate:Clone()
+	model.Name = "HeldDecoyBottle"
+	prepareHeldBottleModel(model)
+	pcall(function()
+		model:ScaleTo(DECOY_VIEWMODEL_SCALE)
+	end)
+	model.Parent = camera or workspace
+	decoyViewModel = model
+end
+
+local function destroyHeldDecoyBottle(restoreFlashlight: boolean?)
+	if decoyViewModel then
+		decoyViewModel:Destroy()
+		decoyViewModel = nil
+	end
+	if restoreFlashlight ~= false then
+		Flashlight.setViewModelSuppressed(false)
+	end
+end
+
+local function updateHeldDecoyBottle()
+	if isEscaped() then
+		destroyHeldDecoyBottle(false)
+		Flashlight.destroy()
+		return
+	end
+	if not hasDecoyBottle then
+		destroyHeldDecoyBottle()
+		return
+	end
+
+	local camera = workspace.CurrentCamera
+	if not camera then return end
+	createHeldDecoyBottle()
+	if decoyViewModel and decoyViewModel.Parent ~= camera then
+		decoyViewModel.Parent = camera
+	end
+	Flashlight.setViewModelSuppressed(decoyViewModel ~= nil)
+
+	local sway = math.sin(os.clock() * 2.4) * 0.012
+	if decoyViewModel then
+		decoyViewModel:PivotTo(camera.CFrame * CFrame.new(0, sway, 0) * DECOY_VIEWMODEL_OFFSET)
+	end
+end
+
+local function updateHeldDecoyFromInventory(payload)
+	local nextHasDecoy = false
+	if typeof(payload) == "table" and typeof(payload.items) == "table" then
+		for _, payloadItem in ipairs(payload.items) do
+			if tostring(payloadItem.id or "") == "DecoyBottle" then
+				nextHasDecoy = true
+				break
+			end
+		end
+	end
+
+	hasDecoyBottle = nextHasDecoy
+	if not hasDecoyBottle then
+		destroyHeldDecoyBottle()
+	end
+end
+
+local function stopRepairHold(sendCancel: boolean)
+	if not isRepairHolding then return end
+
+	if sendCancel and objectiveEvent then
+		objectiveEvent:FireServer("RepairPanel", "CancelRepair")
+	end
+
+	isRepairHolding = false
+	repairTarget = nil
+	if repairProgressFrame then
+		repairProgressFrame.Visible = false
+	end
+	if repairProgressFill then
+		repairProgressFill.Size = UDim2.fromScale(0, 0)
+	end
+end
+
+local function startRepairHold(target: BasePart)
+	if isRepairHolding or not objectiveEvent then return end
+
+	isRepairHolding = true
+	repairStartAt = os.clock()
+	repairTarget = target
+	objectiveEvent:FireServer("RepairPanel", "BeginRepair")
+
+	if repairProgressFrame then
+		repairProgressFrame.Visible = true
+	end
 end
 
 local function updatePrompt()
@@ -340,6 +582,11 @@ local function updatePrompt()
 end
 
 local function showStatus(text, statusType)
+	if statusType == "repairCancel" or statusType == "repairComplete" then
+		stopRepairHold(false)
+		return
+	end
+
 	if not statusFrame or not statusLabel then return end
 
 	if statusType == "sub" then
@@ -355,6 +602,48 @@ local function showStatus(text, statusType)
 	statusFrame.Visible = true
 end
 
+local function updateRepairProgress()
+	if not isRepairHolding then return end
+
+	local target = repairTarget
+	local rootPart = getCharacterRoot()
+	if not target or not target.Parent or getObjectiveName(nearestObjective) ~= "RepairPanel" or not rootPart then
+		stopRepairHold(true)
+		return
+	end
+
+	if (rootPart.Position - target.Position).Magnitude > PROMPT_RANGE then
+		stopRepairHold(true)
+		return
+	end
+
+	local camera = workspace.CurrentCamera
+	if repairProgressFrame and camera then
+		local viewportPoint = camera:WorldToViewportPoint(getPromptWorldPosition(target))
+		local distance = (rootPart.Position - target.Position).Magnitude
+		local fadeAlpha = 1
+		if distance > PROMPT_FADE_START then
+			fadeAlpha = 1 - ((distance - PROMPT_FADE_START) / (PROMPT_RANGE - PROMPT_FADE_START))
+		end
+		fadeAlpha = math.clamp(fadeAlpha, 0, 1)
+
+		local scale = 0.72 + (fadeAlpha * 0.28)
+		local verticalLift = 8 + ((1 - fadeAlpha) * 8)
+		local promptBottomY = viewportPoint.Y - verticalLift
+		local progressY = promptBottomY + (PROMPT_BASE_SIZE.Y * scale * 0.5) + REPAIR_PROGRESS_GAP
+		repairProgressFrame.Position = UDim2.fromOffset(viewportPoint.X, progressY)
+	end
+
+	local progress = math.clamp((os.clock() - repairStartAt) / REPAIR_DURATION, 0, 1)
+	if repairProgressFill then
+		repairProgressFill.Size = UDim2.fromScale(progress, progress)
+	end
+
+	if progress >= 1 then
+		stopRepairHold(false)
+	end
+end
+
 local function throwDecoy()
 	if isEscaped() then return end
 	if not decoyThrowEvent then return end
@@ -365,17 +654,23 @@ local function throwDecoy()
 	local origin = rootPart.Position + Vector3.new(0, 2, 0)
 	local direction = camera and camera.CFrame.LookVector or rootPart.CFrame.LookVector
 	decoyThrowEvent:FireServer(origin, direction)
+	hasDecoyBottle = false
+	destroyHeldDecoyBottle()
 end
 
 function ObjectiveClient.init()
 	if initialized then return end
 	initialized = true
 
+	cacheHeldDecoyTemplate()
 	createGui()
 	showStatus("Find the keycard.", "main")
 
 	if objectiveStatusEvent then
 		objectiveStatusEvent.OnClientEvent:Connect(showStatus)
+	end
+	if inventoryEvent then
+		inventoryEvent.OnClientEvent:Connect(updateHeldDecoyFromInventory)
 	end
 
 	UserInputService.InputBegan:Connect(function(input, gameProcessed)
@@ -383,15 +678,27 @@ function ObjectiveClient.init()
 		if isEscaped() then return end
 
 		if input.KeyCode == Enum.KeyCode.E and nearestObjective and objectiveEvent then
-			local objectiveName = nearestObjective:GetAttribute("ObjectiveName") or nearestObjective.Name
-			objectiveEvent:FireServer(objectiveName)
+			local objectiveName = getObjectiveName(nearestObjective)
+			if objectiveName == "RepairPanel" then
+				startRepairHold(nearestObjective)
+			else
+				objectiveEvent:FireServer(objectiveName)
+			end
 		elseif input.KeyCode == Enum.KeyCode.G then
 			throwDecoy()
 		end
 	end)
 
+	UserInputService.InputEnded:Connect(function(input)
+		if input.KeyCode == Enum.KeyCode.E then
+			stopRepairHold(true)
+		end
+	end)
+
 	RunService.RenderStepped:Connect(function()
 		updatePrompt()
+		updateRepairProgress()
+		updateHeldDecoyBottle()
 
 		if statusFrame and statusFrame.Visible and statusHideAt ~= math.huge and os.clock() > statusHideAt then
 			statusFrame.Visible = false

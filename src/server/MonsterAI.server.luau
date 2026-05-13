@@ -15,6 +15,7 @@ local TOUCH_ATTACK_RANGE = 2.35
 local STILL_SURVIVE_TIME = 1.35
 local CATCH_COOLDOWN = 4
 local COOP_VISUAL_THRESHOLD = 0.025
+local AUTHORED_MAP_NAMES = { "Spaceship_Map", "Map" }
 local NOISE_REACTIONS = {
 	crouch = {
 		hearThreshold = 0.55,
@@ -79,6 +80,17 @@ serverNoiseEvent.Parent = ReplicatedStorage
 local caughtEvent = ReplicatedStorage:FindFirstChild("MonsterCaughtPlayer") or Instance.new("RemoteEvent")
 caughtEvent.Name = "MonsterCaughtPlayer"
 caughtEvent.Parent = ReplicatedStorage
+
+local function getActiveMap(): Instance?
+	for _, mapName in ipairs(AUTHORED_MAP_NAMES) do
+		local map = workspace:FindFirstChild(mapName)
+		if map then
+			return map
+		end
+	end
+
+	return workspace:FindFirstChild("Prototype_Map")
+end
 
 local lastNoisePosition = nil
 local lastNoiseTime = 0
@@ -309,7 +321,7 @@ local function updateDynamicSpeed(destination: Vector3, isChasing: boolean)
 end
 
 local function setupPatrol()
-	local map = workspace:FindFirstChild("Prototype_Map")
+	local map = getActiveMap()
 	if not map then return end
 	-- Prefer dedicated patrol point parts
 	for _, child in pairs(map:GetDescendants()) do

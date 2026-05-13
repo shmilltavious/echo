@@ -11,12 +11,24 @@ local InventoryDefinitions = require(ReplicatedStorage.Shared.InventoryDefinitio
 local OBJECTIVE_TAG = "Objective"
 local REVEAL_TAG = "EcholocationReveal"
 local INTERACT_RANGE = 16
+local REPAIR_DURATION = 3
+local FLASHLIGHT_ITEM_ID = "Flashlight"
+local FUSE_BOX_DISCONNECTED_NAME = "Fuse Box (Disconnected)"
+local FUSE_BOX_CONNECTED_NAME = "Fuse Box (Connected)"
+local PROTOTYPE_MAP_NAME = "Prototype_Map"
+local AUTHORED_MAP_NAMES = { "Spaceship_Map", "Map" }
 local SOUND_IDS = {
 	pickup = "rbxassetid://9112854440",
 	panelRepair = "rbxassetid://9112854440",
 	escapeSuccess = "rbxassetid://9112854440",
-	decoyImpact = "rbxassetid://9113420772",
+	decoyShatter = "rbxassetid://9112854440",
 }
+
+local ESCAPE_DOOR_POSITION = Vector3.new(158.5, 6, 39)
+local ESCAPE_DOOR_SIZE = Vector3.new(7, 10, 1)
+local ESCAPE_DOOR_OPEN_OFFSET = Vector3.new(0, 12, 0)
+local DECOY_SHARD_COUNT = 10
+local DECOY_SHATTER_FALLBACK_SECONDS = 2.25
 
 local objectiveOrder = {
 	Keycard = 1,
@@ -36,6 +48,9 @@ local interactPartNames = {
 
 local playerState = {}
 local inventories = {}
+local repairSessions = {}
+local itemArtTemplates = {}
+local warnedValidationMessages = {}
 local objectiveState = {
 	keycardAcquired = false,
 	fuseHolder = nil,
@@ -83,9 +98,11 @@ local function getInventory(player)
 	local inventory = inventories[player]
 	if not inventory then
 		inventory = {
-			items = {},
+			items = { FLASHLIGHT_ITEM_ID },
 		}
 		inventories[player] = inventory
+	elseif not table.find(inventory.items, FLASHLIGHT_ITEM_ID) then
+		table.insert(inventory.items, 1, FLASHLIGHT_ITEM_ID)
 	end
 	return inventory
 end
@@ -130,6 +147,10 @@ local function hasItem(player, itemId: string): boolean
 end
 
 local function addItem(player, itemId: string): boolean
+	if hasItem(player, itemId) then
+		return true
+	end
+
 	local weight = InventoryDefinitions.getWeight(itemId)
 	local used = getInventoryUsed(player)
 	if used + weight > InventoryDefinitions.CAPACITY then
@@ -142,6 +163,10 @@ local function addItem(player, itemId: string): boolean
 end
 
 local function removeItem(player, itemId: string): boolean
+	if itemId == FLASHLIGHT_ITEM_ID then
+		return false
+	end
+
 	local items = getInventory(player).items
 	for index, heldId in ipairs(items) do
 		if heldId == itemId then
@@ -151,6 +176,15 @@ local function removeItem(player, itemId: string): boolean
 		end
 	end
 	return false
+end
+
+local function warnOnce(key: string, message: string)
+	if warnedValidationMessages[key] then
+		return
+	end
+
+	warnedValidationMessages[key] = true
+	warn("[ObjectiveSystem] " .. message)
 end
 
 local function playWorldSound(parent: Instance, name: string, soundId: string, volume: number, maxDistance: number)
@@ -165,6 +199,166 @@ local function playWorldSound(parent: Instance, name: string, soundId: string, v
 	Debris:AddItem(sound, 6)
 end
 
+local function playAnchoredWorldSound(position: Vector3, name: string, soundId: string, volume: number, maxDistance: number)
+	local anchor = Instance.new("Part")
+	anchor.Name = name .. "Anchor"
+	anchor.Anchored = true
+	anchor.CanCollide = false
+	anchor.CanTouch = false
+	anchor.CanQuery = false
+	anchor.Transparency = 1
+	anchor.Size = Vector3.new(0.2, 0.2, 0.2)
+	anchor.Position = position
+	anchor.Parent = workspace
+	playWorldSound(anchor, name, soundId, volume, maxDistance)
+	Debris:AddItem(anchor, 6)
+end
+
+local function getActiveAuthoredMap(): Instance?
+	for _, mapName in ipairs(AUTHORED_MAP_NAMES) do
+		local map = workspace:FindFirstChild(mapName)
+		if map then
+			return map
+		end
+	end
+
+	return nil
+end
+
+local function getActiveMap(): Instance?
+	return getActiveAuthoredMap() or workspace:FindFirstChild(PROTOTYPE_MAP_NAME)
+end
+
+local function findItemArtSource(itemId: string): Model?
+	local templateRoot = ReplicatedStorage:FindFirstChild("ItemTemplates")
+	local template = templateRoot and templateRoot:FindFirstChild(itemId, true)
+	if template and template:IsA("Model") then
+		return template
+	end
+	if templateRoot then
+		for _, descendant in ipairs(templateRoot:GetDescendants()) do
+			if descendant:IsA("Model") and descendant:GetAttribute("ObjectiveName") == itemId then
+				return descendant
+			end
+		end
+	end
+
+	local direct = workspace:FindFirstChild(itemId)
+	if direct and direct:IsA("Model") then
+		return direct
+	end
+
+	local nested = workspace:FindFirstChild(itemId, true)
+	if nested and nested:IsA("Model") then
+		return nested
+	end
+
+	for _, descendant in ipairs(workspace:GetDescendants()) do
+		if descendant:IsA("Model") and descendant:GetAttribute("ObjectiveName") == itemId then
+			return descendant
+		end
+	end
+
+	return nil
+end
+
+local function prepareItemArtClone(model: Model)
+	for _, descendant in ipairs(model:GetDescendants()) do
+		if descendant.Name:find("Interact") then
+			descendant:Destroy()
+		elseif descendant:IsA("BasePart") then
+			descendant.Anchored = false
+			descendant.CanCollide = true
+			descendant.CanTouch = true
+			descendant.CanQuery = true
+			descendant.Transparency = descendant:GetAttribute("EchoOriginalTransparency") or descendant.Transparency
+			CollectionService:AddTag(descendant, REVEAL_TAG)
+		elseif descendant:IsA("Script") or descendant:IsA("LocalScript") then
+			descendant:Destroy()
+		end
+	end
+end
+
+local function cacheItemArtTemplate(itemId: string)
+	if itemArtTemplates[itemId] then
+		return
+	end
+
+	local source = findItemArtSource(itemId)
+	if not source then
+		return
+	end
+
+	local template = Instance.new("Model")
+	template.Name = itemId .. "ArtTemplate"
+	for _, child in ipairs(source:GetChildren()) do
+		if not child.Name:find("Interact") then
+			child:Clone().Parent = template
+		end
+	end
+	prepareItemArtClone(template)
+	if #template:GetChildren() == 0 then
+		template:Destroy()
+		return
+	end
+	template.Parent = nil
+	itemArtTemplates[itemId] = template
+end
+
+local function cloneItemArt(itemId: string, name: string): Model?
+	cacheItemArtTemplate(itemId)
+	local template = itemArtTemplates[itemId]
+	if not template then
+		return nil
+	end
+
+	local clone = template:Clone()
+	clone.Name = name
+	prepareItemArtClone(clone)
+	return clone
+end
+
+local function getLargestPart(model: Model): BasePart?
+	local largestPart = nil
+	local largestVolume = -math.huge
+	for _, descendant in ipairs(model:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			local size = descendant.Size
+			local volume = size.X * size.Y * size.Z
+			if volume > largestVolume then
+				largestVolume = volume
+				largestPart = descendant
+			end
+		end
+	end
+	return largestPart
+end
+
+local function makeThrownItemPhysical(model: Model): BasePart?
+	local primary = model.PrimaryPart or getLargestPart(model)
+	if not primary then
+		return nil
+	end
+	model.PrimaryPart = primary
+
+	for _, descendant in ipairs(model:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.Anchored = false
+			descendant.CanTouch = true
+			descendant.CanQuery = true
+			descendant.CanCollide = descendant == primary
+			if descendant ~= primary then
+				local weld = Instance.new("WeldConstraint")
+				weld.Part0 = primary
+				weld.Part1 = descendant
+				weld.Parent = descendant
+			end
+		end
+	end
+
+	return primary
+end
+
 local function getSurvivalStats(state)
 	local survivedTime = math.max(0, os.clock() - (state.startedAt or os.clock()))
 	local score = math.floor(500 + (survivedTime * 12))
@@ -172,31 +366,62 @@ local function getSurvivalStats(state)
 end
 
 local function ensureMap()
-	local map = workspace:FindFirstChild("Prototype_Map")
+	local map = workspace:FindFirstChild(PROTOTYPE_MAP_NAME)
 	if not map then
 		map = Instance.new("Folder")
-		map.Name = "Prototype_Map"
+		map.Name = PROTOTYPE_MAP_NAME
 		map.Parent = workspace
 	end
 	return map
+end
+
+local function getExplicitInteractPart(candidate: Instance?, objectiveName: string): BasePart?
+	if not candidate then
+		return nil
+	end
+
+	local interactName = interactPartNames[objectiveName]
+	if not interactName then
+		return nil
+	end
+
+	if candidate:IsA("BasePart") and candidate.Name == interactName then
+		return candidate
+	end
+
+	local descendant = candidate:FindFirstChild(interactName, true)
+	if descendant and descendant:IsA("BasePart") then
+		return descendant
+	end
+
+	local current = candidate.Parent
+	while current and current ~= workspace do
+		local sibling = current:FindFirstChild(interactName, true)
+		if sibling and sibling:IsA("BasePart") then
+			return sibling
+		end
+		current = current.Parent
+	end
+
+	return nil
 end
 
 local function getBasePartFromCandidate(candidate: Instance?, objectiveName: string): BasePart?
 	if not candidate then
 		return nil
 	end
+
+	local interactPart = getExplicitInteractPart(candidate, objectiveName)
+	if interactPart then
+		return interactPart
+	end
+
 	if candidate:IsA("BasePart") then
 		return candidate
 	end
 	if candidate:IsA("Model") then
 		if candidate.PrimaryPart then
 			return candidate.PrimaryPart
-		end
-
-		local interactName = interactPartNames[objectiveName]
-		local interactPart = interactName and candidate:FindFirstChild(interactName, true)
-		if interactPart and interactPart:IsA("BasePart") then
-			return interactPart
 		end
 	end
 
@@ -245,10 +470,148 @@ local function findAuthoredObjectivePart(objectiveName: string): BasePart?
 	return getBasePartFromCandidate(legacyObjective, objectiveName)
 end
 
-local function makePart(parent, objectiveName, name, position, size, color, material)
+local function isEscapeDoorTrigger(instance: Instance?): boolean
+	return instance ~= nil
+		and instance:IsA("BasePart")
+		and instance.Name == interactPartNames.EscapeDoor
+end
+
+local function findEscapeDoorTrigger(): BasePart?
+	local namedTrigger = workspace:FindFirstChild(interactPartNames.EscapeDoor, true)
+	if namedTrigger and namedTrigger:IsA("BasePart") then
+		return namedTrigger
+	end
+
+	for _, instance in ipairs(CollectionService:GetTagged(OBJECTIVE_TAG)) do
+		if instance:IsDescendantOf(workspace)
+			and instance:IsA("BasePart")
+			and instance:GetAttribute("ObjectiveName") == "EscapeDoor"
+		then
+			return instance
+		end
+	end
+
+	return nil
+end
+
+local function findEscapeDoorVisual(): Instance?
+	local namedDoor = workspace:FindFirstChild("EscapeDoor", true)
+	if namedDoor and not isEscapeDoorTrigger(namedDoor) and (namedDoor:IsA("BasePart") or namedDoor:IsA("Model")) then
+		return namedDoor
+	end
+
+	for _, instance in ipairs(workspace:GetDescendants()) do
+		if instance:GetAttribute("ObjectiveName") == "EscapeDoor"
+			and not isEscapeDoorTrigger(instance)
+			and (instance:IsA("BasePart") or instance:IsA("Model"))
+		then
+			return instance
+		end
+	end
+
+	return nil
+end
+
+local function getInstanceBounds(instance: Instance?): (CFrame, Vector3)
+	if instance and instance:IsA("Model") then
+		return instance:GetBoundingBox()
+	elseif instance and instance:IsA("BasePart") then
+		return instance.CFrame, instance.Size
+	end
+
+	return CFrame.new(ESCAPE_DOOR_POSITION), ESCAPE_DOOR_SIZE
+end
+
+local function tagRevealVisual(instance: Instance)
+	if instance:IsA("BasePart") then
+		CollectionService:AddTag(instance, REVEAL_TAG)
+	end
+
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			CollectionService:AddTag(descendant, REVEAL_TAG)
+		end
+	end
+end
+
+local function cacheEscapeDoorState(visual: Instance)
+	if visual:IsA("BasePart") then
+		if visual:GetAttribute("ClosedPosition") == nil then
+			visual:SetAttribute("ClosedPosition", visual.Position)
+		end
+		if visual:GetAttribute("OpenPosition") == nil then
+			visual:SetAttribute("OpenPosition", visual.Position + ESCAPE_DOOR_OPEN_OFFSET)
+		end
+	elseif visual:IsA("Model") then
+		if visual:GetAttribute("ClosedPivot") == nil then
+			visual:SetAttribute("ClosedPivot", visual:GetPivot())
+		end
+		if visual:GetAttribute("OpenPivot") == nil then
+			visual:SetAttribute("OpenPivot", visual:GetPivot() + ESCAPE_DOOR_OPEN_OFFSET)
+		end
+	end
+end
+
+local function makeEscapeDoorVisual(parent: Instance, trigger: BasePart?): BasePart
+	local visual = Instance.new("Part")
+	visual.Name = "EscapeDoor"
+	visual.Anchored = true
+	visual.CanCollide = true
+	visual.Size = ESCAPE_DOOR_SIZE
+	visual.CFrame = if trigger then CFrame.new(trigger.Position) else CFrame.new(ESCAPE_DOOR_POSITION)
+	visual.Color = Color3.fromRGB(90, 90, 100)
+	visual.Material = Enum.Material.Metal
+	visual.Parent = parent
+	return visual
+end
+
+local function ensureEscapeDoorSetup(parent: Instance): BasePart
+	local trigger = findEscapeDoorTrigger()
+	local visual = findEscapeDoorVisual()
+
+	if not visual then
+		visual = makeEscapeDoorVisual(parent, trigger)
+	end
+
+	local visualCFrame, visualSize = getInstanceBounds(visual)
+	if not trigger then
+		trigger = Instance.new("Part")
+		trigger.Name = interactPartNames.EscapeDoor
+		trigger.Parent = parent
+	end
+
+	trigger.Anchored = true
+	trigger.CanCollide = false
+	trigger.CanTouch = true
+	trigger.CanQuery = true
+	trigger.Transparency = 1
+	trigger.Size = Vector3.new(math.max(visualSize.X, 6), math.max(visualSize.Y, 8), math.max(visualSize.Z, 4))
+	trigger.CFrame = visualCFrame
+	trigger:SetAttribute("ObjectiveName", "EscapeDoor")
+	trigger:SetAttribute("ObjectiveOrder", objectiveOrder.EscapeDoor)
+	trigger:SetAttribute("EquipSlot", "World")
+	trigger:SetAttribute("ViewModelWhenEquipped", false)
+	CollectionService:AddTag(trigger, OBJECTIVE_TAG)
+
+	tagRevealVisual(visual)
+	cacheEscapeDoorState(visual)
+
+	return trigger
+end
+
+local function makePart(parent, objectiveName, name, position, size, color, material, allowFallback: boolean?)
 	local existing = findAuthoredObjectivePart(objectiveName)
 	if existing then
 		return existing
+	end
+
+	if allowFallback == false then
+		warnOnce("missing-objective-" .. objectiveName, string.format(
+			"Missing authored objective '%s'. Expected a tagged/attributed model or a BasePart named '%s'. Prototype fallback was skipped because an authored map is present.",
+			objectiveName,
+			name
+		))
+		return nil
 	end
 
 	local part = Instance.new("Part")
@@ -273,60 +636,271 @@ local function tagObjective(part, objectiveName)
 end
 
 local function findObjectivePart(objectiveName)
+	if objectiveName == "EscapeDoor" then
+		return findEscapeDoorTrigger()
+	end
+
 	return findAuthoredObjectivePart(objectiveName)
 end
 
+local function clearEcholocationHighlights(instance: Instance)
+	if instance:IsA("BasePart") then
+		local highlight = instance:FindFirstChild("EcholocationOutline")
+		if highlight and highlight:IsA("Highlight") then
+			highlight:Destroy()
+		end
+	end
+
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			local highlight = descendant:FindFirstChild("EcholocationOutline")
+			if highlight and highlight:IsA("Highlight") then
+				highlight:Destroy()
+			end
+		end
+	end
+end
+
+local function cacheVisualState(instance: Instance)
+	if instance:IsA("BasePart") then
+		if instance:GetAttribute("EchoOriginalTransparency") == nil then
+			instance:SetAttribute("EchoOriginalTransparency", instance.Transparency)
+			instance:SetAttribute("EchoOriginalCanCollide", instance.CanCollide)
+			instance:SetAttribute("EchoOriginalCanTouch", instance.CanTouch)
+			instance:SetAttribute("EchoOriginalCanQuery", instance.CanQuery)
+		end
+	elseif instance:IsA("Decal") or instance:IsA("Texture") then
+		if instance:GetAttribute("EchoOriginalTransparency") == nil then
+			instance:SetAttribute("EchoOriginalTransparency", instance.Transparency)
+		end
+	elseif instance:IsA("SurfaceGui") or instance:IsA("BillboardGui") then
+		if instance:GetAttribute("EchoOriginalEnabled") == nil then
+			instance:SetAttribute("EchoOriginalEnabled", instance.Enabled)
+		end
+	end
+end
+
+local function setVisualInstanceEnabled(instance: Instance, enabled: boolean)
+	cacheVisualState(instance)
+	instance:SetAttribute("EcholocationRevealHidden", not enabled)
+
+	if instance:IsA("BasePart") then
+		if enabled then
+			instance.Transparency = instance:GetAttribute("EchoOriginalTransparency") or 0
+			instance.CanCollide = instance:GetAttribute("EchoOriginalCanCollide") == true
+			instance.CanTouch = instance:GetAttribute("EchoOriginalCanTouch") == true
+			instance.CanQuery = instance:GetAttribute("EchoOriginalCanQuery") ~= false
+		else
+			instance.Transparency = 1
+			instance.CanCollide = false
+			instance.CanTouch = false
+			instance.CanQuery = false
+		end
+	elseif instance:IsA("Decal") or instance:IsA("Texture") then
+		instance.Transparency = if enabled then (instance:GetAttribute("EchoOriginalTransparency") or 0) else 1
+	elseif instance:IsA("SurfaceGui") or instance:IsA("BillboardGui") then
+		instance.Enabled = if enabled then (instance:GetAttribute("EchoOriginalEnabled") ~= false) else false
+	end
+
+	if not enabled then
+		clearEcholocationHighlights(instance)
+	end
+
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		setVisualInstanceEnabled(descendant, enabled)
+	end
+end
+
+local function getAuthoredFuseBox(name: string): Instance?
+	local activeMap = getActiveMap()
+	local inMap = activeMap and activeMap:FindFirstChild(name, true)
+	if inMap then
+		return inMap
+	end
+
+	return workspace:FindFirstChild(name, true)
+end
+
+local function prepareFuseBoxes()
+	local disconnectedBox = getAuthoredFuseBox(FUSE_BOX_DISCONNECTED_NAME)
+	local connectedBox = getAuthoredFuseBox(FUSE_BOX_CONNECTED_NAME)
+	if not disconnectedBox or not connectedBox then
+		return
+	end
+
+	setVisualInstanceEnabled(disconnectedBox, true)
+	setVisualInstanceEnabled(connectedBox, false)
+end
+
+local function showConnectedFuseBox(): boolean
+	local disconnectedBox = getAuthoredFuseBox(FUSE_BOX_DISCONNECTED_NAME)
+	local connectedBox = getAuthoredFuseBox(FUSE_BOX_CONNECTED_NAME)
+	if not disconnectedBox or not connectedBox then
+		return false
+	end
+
+	local targetCFrame
+	if disconnectedBox:IsA("Model") then
+		targetCFrame = disconnectedBox:GetPivot()
+	elseif disconnectedBox:IsA("BasePart") then
+		targetCFrame = disconnectedBox.CFrame
+	else
+		return false
+	end
+
+	if connectedBox:IsA("Model") then
+		connectedBox:PivotTo(targetCFrame)
+	elseif connectedBox:IsA("BasePart") then
+		connectedBox.CFrame = targetCFrame
+	else
+		return false
+	end
+
+	setVisualInstanceEnabled(disconnectedBox, false)
+	setVisualInstanceEnabled(connectedBox, true)
+	return true
+end
+
+local function validateInteractPart(objectiveName: string, part: BasePart?)
+	local expectedName = interactPartNames[objectiveName]
+	if not part then
+		warnOnce("validate-missing-" .. objectiveName, string.format(
+			"Authored map is missing '%s' for objective '%s'.",
+			expectedName or objectiveName,
+			objectiveName
+		))
+		return
+	end
+
+	if expectedName and part.Name ~= expectedName then
+		warnOnce("validate-name-" .. objectiveName, string.format(
+			"Objective '%s' resolved to '%s'. Prefer an explicit '%s' trigger so final-map visuals can move independently.",
+			objectiveName,
+			part:GetFullName(),
+			expectedName
+		))
+	end
+
+	if part.Transparency < 0.95 then
+		warnOnce("validate-visible-" .. objectiveName, string.format(
+			"Interact trigger '%s' should usually be invisible; current Transparency is %.2f.",
+			part:GetFullName(),
+			part.Transparency
+		))
+	end
+	if part.CanCollide then
+		warnOnce("validate-collide-" .. objectiveName, "Interact trigger '" .. part:GetFullName() .. "' should not block players.")
+	end
+	if not part.CanQuery or not part.CanTouch then
+		warnOnce("validate-query-" .. objectiveName, "Interact trigger '" .. part:GetFullName() .. "' should have CanQuery and CanTouch enabled.")
+	end
+end
+
+local function hasMonsterWaypoints(map: Instance): boolean
+	if map:FindFirstChild("MonsterPatrolWaypoints", true) then
+		return true
+	end
+
+	for _, descendant in ipairs(map:GetDescendants()) do
+		if descendant:IsA("BasePart") and (descendant.Name == "PatrolPoint" or descendant.Name == "Waypoint") then
+			return true
+		end
+	end
+
+	return false
+end
+
+local function validateAuthoredMapSetup(map: Instance)
+	for objectiveName in pairs(interactPartNames) do
+		validateInteractPart(objectiveName, findObjectivePart(objectiveName))
+	end
+
+	for _, itemId in ipairs({ "Flashlight", "Keycard", "Fuse", "DecoyBottle" }) do
+		if not findItemArtSource(itemId) then
+			warnOnce("validate-art-" .. itemId, "Missing authored item art model for inventory/held/thrown clone: " .. itemId)
+		end
+	end
+
+	if not (map:FindFirstChild("RevealTargets", true) or workspace:FindFirstChild("RevealTargets")) then
+		warnOnce("validate-reveal-root", "Authored map has no RevealTargets folder. Echolocation will use tagged reveal parts or the active map root as fallback.")
+	end
+
+	if not hasMonsterWaypoints(map) then
+		warnOnce("validate-waypoints", "Authored map has no MonsterPatrolWaypoints folder, PatrolPoint parts, or Waypoint parts.")
+	end
+end
+
 local function ensureObjectiveProps()
-	local map = ensureMap()
+	local authoredMap = getActiveAuthoredMap()
+	local map = authoredMap or ensureMap()
+	local allowFallback = authoredMap == nil
 
-	local keycard = makePart(map, "Keycard", interactPartNames.Keycard, Vector3.new(80.5, 3, 26), Vector3.new(2, 0.2, 1.2), Color3.fromRGB(45, 170, 255), Enum.Material.Neon)
-	local fuse = makePart(map, "Fuse", interactPartNames.Fuse, Vector3.new(132.5, 3, 13), Vector3.new(1.2, 1.2, 2.5), Color3.fromRGB(255, 210, 70), Enum.Material.Metal)
-	local repairPanel = makePart(map, "RepairPanel", interactPartNames.RepairPanel, Vector3.new(151.2, 5, -32.5), Vector3.new(4, 6, 0.6), Color3.fromRGB(85, 130, 120), Enum.Material.Metal)
-	local escapeDoor = makePart(map, "EscapeDoor", interactPartNames.EscapeDoor, Vector3.new(158.5, 6, 39), Vector3.new(7, 10, 1), Color3.fromRGB(90, 90, 100), Enum.Material.Metal)
-	local decoy = makePart(map, "DecoyBottle", interactPartNames.DecoyBottle, Vector3.new(106.5, 3, -13), Vector3.new(1, 2, 1), Color3.fromRGB(120, 190, 180), Enum.Material.Glass)
-	local landmark = makePart(map, "AudioLandmark", "AudioLandmark", Vector3.new(93.5, 4, -39), Vector3.new(2, 4, 2), Color3.fromRGB(255, 125, 40), Enum.Material.Neon)
-
-	keycard.CanCollide = false
-	fuse.CanCollide = false
-	decoy.CanCollide = false
-	if escapeDoor:GetAttribute("ClosedPosition") == nil then
-		escapeDoor:SetAttribute("ClosedPosition", escapeDoor.Position)
+	local keycard = makePart(map, "Keycard", interactPartNames.Keycard, Vector3.new(80.5, 3, 26), Vector3.new(2, 0.2, 1.2), Color3.fromRGB(45, 170, 255), Enum.Material.Neon, allowFallback)
+	local fuse = makePart(map, "Fuse", interactPartNames.Fuse, Vector3.new(132.5, 3, 13), Vector3.new(1.2, 1.2, 2.5), Color3.fromRGB(255, 210, 70), Enum.Material.Metal, allowFallback)
+	local repairPanel = makePart(map, "RepairPanel", interactPartNames.RepairPanel, Vector3.new(151.2, 5, -32.5), Vector3.new(4, 6, 0.6), Color3.fromRGB(85, 130, 120), Enum.Material.Metal, allowFallback)
+	local existingEscapeTrigger = findEscapeDoorTrigger()
+	local existingEscapeVisual = findEscapeDoorVisual()
+	if authoredMap and not existingEscapeTrigger then
+		warnOnce("missing-objective-EscapeDoor", string.format(
+			"Missing authored objective 'EscapeDoor'. Expected a persistent BasePart named '%s'.",
+			interactPartNames.EscapeDoor
+		))
 	end
-	if escapeDoor:GetAttribute("OpenPosition") == nil then
-		escapeDoor:SetAttribute("OpenPosition", escapeDoor.Position + Vector3.new(0, 12, 0))
+	local escapeDoor = if allowFallback or existingEscapeTrigger or existingEscapeVisual then ensureEscapeDoorSetup(map) else nil
+	local decoy = makePart(map, "DecoyBottle", interactPartNames.DecoyBottle, Vector3.new(106.5, 3, -13), Vector3.new(1, 2, 1), Color3.fromRGB(120, 190, 180), Enum.Material.Glass, allowFallback)
+	local landmark = makePart(map, "AudioLandmark", "AudioLandmark", Vector3.new(93.5, 4, -39), Vector3.new(2, 4, 2), Color3.fromRGB(255, 125, 40), Enum.Material.Neon, allowFallback)
+
+	for _, itemId in ipairs({ "Flashlight", "Keycard", "Fuse", "DecoyBottle" }) do
+		cacheItemArtTemplate(itemId)
 	end
 
-	for _, part in ipairs({ keycard, fuse, repairPanel, escapeDoor, decoy, landmark }) do
+	if keycard then keycard.CanCollide = false end
+	if fuse then fuse.CanCollide = false end
+	if decoy then decoy.CanCollide = false end
+	prepareFuseBoxes()
+
+	for _, part in pairs({ keycard, fuse, repairPanel, decoy, landmark }) do
 		CollectionService:AddTag(part, REVEAL_TAG)
 	end
-	tagObjective(keycard, "Keycard")
-	tagObjective(fuse, "Fuse")
-	tagObjective(repairPanel, "RepairPanel")
-	tagObjective(escapeDoor, "EscapeDoor")
-	tagObjective(decoy, "DecoyBottle")
-	keycard:SetAttribute("EquipSlot", "Inventory")
-	fuse:SetAttribute("EquipSlot", "Inventory")
-	decoy:SetAttribute("EquipSlot", "Inventory")
-	decoy:SetAttribute("ViewModelWhenEquipped", true)
-	decoy:SetAttribute("ViewModelNote", "Replace with a right-hand bottle/tool viewmodel when equipped.")
-	repairPanel:SetAttribute("EquipSlot", "World")
-	escapeDoor:SetAttribute("EquipSlot", "World")
-	landmark:SetAttribute("ObjectiveName", "AudioLandmark")
-	landmark:SetAttribute("EquipSlot", "World")
-	landmark:SetAttribute("ViewModelWhenEquipped", false)
-
-	local sound = landmark:FindFirstChild("AmbientLoop")
-	if not sound then
-		sound = Instance.new("Sound")
-		sound.Name = "AmbientLoop"
-		sound.Looped = true
-		sound.Volume = 0.35
-		sound.RollOffMaxDistance = 65
-		sound.RollOffMinDistance = 8
-		sound.SoundId = "rbxassetid://9112854440"
-		sound.Parent = landmark
+	if keycard then
+		tagObjective(keycard, "Keycard")
+		keycard:SetAttribute("EquipSlot", "Inventory")
 	end
-	sound:Play()
+	if fuse then
+		tagObjective(fuse, "Fuse")
+		fuse:SetAttribute("EquipSlot", "Inventory")
+	end
+	if repairPanel then
+		tagObjective(repairPanel, "RepairPanel")
+		repairPanel:SetAttribute("EquipSlot", "World")
+	end
+	if decoy then
+		tagObjective(decoy, "DecoyBottle")
+		decoy:SetAttribute("EquipSlot", "Inventory")
+		decoy:SetAttribute("ViewModelWhenEquipped", true)
+	end
+	if landmark then
+		landmark:SetAttribute("ObjectiveName", "AudioLandmark")
+		landmark:SetAttribute("EquipSlot", "World")
+		landmark:SetAttribute("ViewModelWhenEquipped", false)
+
+		local sound = landmark:FindFirstChild("AmbientLoop")
+		if not sound then
+			sound = Instance.new("Sound")
+			sound.Name = "AmbientLoop"
+			sound.Looped = true
+			sound.Volume = 0.35
+			sound.RollOffMaxDistance = 65
+			sound.RollOffMinDistance = 8
+			sound.SoundId = "rbxassetid://9112854440"
+			sound.Parent = landmark
+		end
+		sound:Play()
+	end
+
+	if authoredMap then
+		validateAuthoredMapSetup(authoredMap)
+	end
 end
 
 local function sendStatus(player, text, statusType)
@@ -364,6 +938,8 @@ local function getCollectibleRoot(part: BasePart, objectiveName: string): Instan
 end
 
 local function hideCollectedInstance(instance: Instance)
+	instance:SetAttribute("Collected", true)
+
 	if instance:IsA("BasePart") then
 		instance.Transparency = 1
 		instance.CanCollide = false
@@ -379,6 +955,8 @@ local function hideCollectedInstance(instance: Instance)
 	end
 
 	for _, descendant in ipairs(instance:GetDescendants()) do
+		descendant:SetAttribute("Collected", true)
+
 		if descendant:IsA("BasePart") then
 			descendant.Transparency = 1
 			descendant.CanCollide = false
@@ -396,6 +974,8 @@ local function hideCollectedInstance(instance: Instance)
 end
 
 local function showCollectibleInstance(instance: Instance)
+	instance:SetAttribute("Collected", false)
+
 	if instance:IsA("BasePart") then
 		instance.Transparency = 0
 		instance.CanTouch = true
@@ -408,6 +988,8 @@ local function showCollectibleInstance(instance: Instance)
 	end
 
 	for _, descendant in ipairs(instance:GetDescendants()) do
+		descendant:SetAttribute("Collected", false)
+
 		if descendant:IsA("BasePart") then
 			descendant.Transparency = 0
 			descendant.CanTouch = true
@@ -426,6 +1008,11 @@ local function setCollected(part: BasePart, objectiveName: string)
 	hideCollectedInstance(root)
 	part:SetAttribute("Collected", true)
 	root:SetAttribute("Collected", true)
+end
+
+local function isCollectibleCollected(part: BasePart, objectiveName: string): boolean
+	local root = getCollectibleRoot(part, objectiveName)
+	return part:GetAttribute("Collected") == true or root:GetAttribute("Collected") == true
 end
 
 local function restoreCollectible(objectiveName: string)
@@ -452,10 +1039,124 @@ local function tryAddInventoryPickup(player, itemId: string): boolean
 end
 
 local function openEscapeDoor()
-	local door = findObjectivePart("EscapeDoor")
-	if not door then return end
-	door.Position = door:GetAttribute("OpenPosition") or (door.Position + Vector3.new(0, 12, 0))
-	door.CanCollide = false
+	local visual = findEscapeDoorVisual()
+	if not visual then return end
+
+	if visual:IsA("BasePart") then
+		visual.Position = visual:GetAttribute("OpenPosition") or (visual.Position + ESCAPE_DOOR_OPEN_OFFSET)
+		visual.CanCollide = false
+	elseif visual:IsA("Model") then
+		visual:PivotTo(visual:GetAttribute("OpenPivot") or (visual:GetPivot() + ESCAPE_DOOR_OPEN_OFFSET))
+		for _, descendant in ipairs(visual:GetDescendants()) do
+			if descendant:IsA("BasePart") and not isEscapeDoorTrigger(descendant) then
+				descendant.CanCollide = false
+			end
+		end
+	end
+
+	local trigger = findEscapeDoorTrigger()
+	if trigger then
+		trigger.CanCollide = false
+		trigger.CanTouch = true
+		trigger.CanQuery = true
+		trigger.Transparency = 1
+	end
+end
+
+local function cancelRepair(player, message: string?)
+	local session = repairSessions[player]
+	if session then
+		session.cancelled = true
+		repairSessions[player] = nil
+	end
+
+	objectiveStatusEvent:FireClient(player, "", "repairCancel")
+	if message then
+		sendStatus(player, message, "sub")
+	end
+end
+
+local function canRepair(player, part: BasePart): (boolean, string?)
+	if isEscaped(player) then
+		return false, nil
+	end
+	if objectiveState.repaired then
+		return false, "Power is already restored."
+	end
+	if objectiveState.fuseHolder ~= player or not hasItem(player, "Fuse") then
+		return false, "The panel needs the fuse carrier."
+	end
+	if not isCloseEnough(player, part) then
+		return false, nil
+	end
+
+	return true, nil
+end
+
+local function completeRepair(player, part: BasePart)
+	local canComplete, message = canRepair(player, part)
+	if not canComplete then
+		cancelRepair(player, message)
+		return
+	end
+
+	objectiveState.repaired = true
+	objectiveState.fuseHolder = nil
+	repairSessions[player] = nil
+	removeItem(player, "Fuse")
+
+	if not showConnectedFuseBox() then
+		part.Color = Color3.fromRGB(80, 255, 140)
+	end
+
+	openEscapeDoor()
+	playWorldSound(part, "PanelRepair", SOUND_IDS.panelRepair, 0.75, 65)
+	objectiveStatusEvent:FireClient(player, "", "repairComplete")
+	broadcastStatus("Reach the escape door.", "main")
+	broadcastStatus("Power restored.", "sub")
+end
+
+local function beginRepair(player)
+	local part = findObjectivePart("RepairPanel")
+	if not (part and part:IsA("BasePart")) then return end
+
+	local canBegin, message = canRepair(player, part)
+	if not canBegin then
+		cancelRepair(player, message)
+		return
+	end
+	if repairSessions[player] then
+		return
+	end
+
+	local session = {
+		cancelled = false,
+		part = part,
+		startedAt = os.clock(),
+	}
+	repairSessions[player] = session
+	sendStatus(player, "Repairing panel...", "sub")
+
+	task.spawn(function()
+		while repairSessions[player] == session and not session.cancelled do
+			local elapsed = os.clock() - session.startedAt
+			if elapsed >= REPAIR_DURATION then
+				break
+			end
+
+			local canContinue, cancelMessage = canRepair(player, part)
+			if not canContinue then
+				cancelRepair(player, cancelMessage)
+				return
+			end
+
+			task.wait(0.1)
+		end
+
+		if repairSessions[player] == session and not session.cancelled then
+			completeRepair(player, part)
+		end
+	end)
 end
 
 local function hideEscapedCharacter(player)
@@ -507,6 +1208,10 @@ local function interact(player, objectiveName)
 			sendStatus(player, "The keycard is already gone.", "sub")
 			return
 		end
+		if isCollectibleCollected(part, objectiveName) then
+			sendStatus(player, "The keycard is already gone.", "sub")
+			return
+		end
 		if not tryAddInventoryPickup(player, "Keycard") then return end
 
 		objectiveState.keycardAcquired = true
@@ -523,7 +1228,17 @@ local function interact(player, objectiveName)
 			sendStatus(player, "The fuse is already being carried.", "sub")
 			return
 		end
-		if not tryAddInventoryPickup(player, "Fuse") then return end
+		if isCollectibleCollected(part, objectiveName) then
+			sendStatus(player, "The fuse is already being carried.", "sub")
+			return
+		end
+		local consumedKeycard = removeItem(player, "Keycard")
+		if not tryAddInventoryPickup(player, "Fuse") then
+			if consumedKeycard then
+				addItem(player, "Keycard")
+			end
+			return
+		end
 
 		objectiveState.fuseHolder = player
 		playWorldSound(part, "ObjectivePickup", SOUND_IDS.pickup, 0.45, 45)
@@ -535,19 +1250,7 @@ local function interact(player, objectiveName)
 			sendStatus(player, "Power is already restored.", "sub")
 			return
 		end
-		if objectiveState.fuseHolder ~= player or not hasItem(player, "Fuse") then
-			sendStatus(player, "The panel needs the fuse carrier.", "sub")
-			return
-		end
-
-		objectiveState.repaired = true
-		objectiveState.fuseHolder = nil
-		removeItem(player, "Fuse")
-		part.Color = Color3.fromRGB(80, 255, 140)
-		openEscapeDoor()
-		playWorldSound(part, "PanelRepair", SOUND_IDS.panelRepair, 0.75, 65)
-		broadcastStatus("Reach the escape door.", "main")
-		broadcastStatus("Power restored.", "sub")
+		beginRepair(player)
 	elseif objectiveName == "EscapeDoor" then
 		if not objectiveState.repaired then
 			sendStatus(player, "Escape door is locked. Repair ship systems first.", "sub")
@@ -565,6 +1268,10 @@ local function interact(player, objectiveName)
 		})
 		sendStatus(player, "You escaped. Spectating survivors.", "main")
 	elseif objectiveName == "DecoyBottle" then
+		if isCollectibleCollected(part, objectiveName) then
+			sendStatus(player, "The bottle is already gone.", "sub")
+			return
+		end
 		if not tryAddInventoryPickup(player, "DecoyBottle") then return end
 
 		playWorldSound(part, "ObjectivePickup", SOUND_IDS.pickup, 0.4, 45)
@@ -595,36 +1302,112 @@ local function throwDecoy(player, origin, direction)
 		spawnPosition = rootPart.Position + Vector3.new(0, 2, 0)
 	end
 
-	local bottle = Instance.new("Part")
-	bottle.Name = "ThrownDecoy"
-	bottle.Shape = Enum.PartType.Ball
-	bottle.Size = Vector3.new(1, 1, 1)
-	bottle.Material = Enum.Material.Glass
-	bottle.Color = Color3.fromRGB(130, 210, 220)
-	bottle.Position = spawnPosition
-	bottle.CanCollide = true
+	local bottle = cloneItemArt("DecoyBottle", "ThrownDecoyBottle")
+	if not bottle then
+		bottle = Instance.new("Model")
+		bottle.Name = "ThrownDecoyBottle"
+		local fallback = Instance.new("Part")
+		fallback.Name = "BottleBody"
+		fallback.Shape = Enum.PartType.Cylinder
+		fallback.Size = Vector3.new(1.55, 0.48, 0.48)
+		fallback.Material = Enum.Material.Glass
+		fallback.Color = Color3.fromRGB(130, 210, 220)
+		fallback.Transparency = 0.18
+		fallback.Parent = bottle
+	end
+
 	bottle.Parent = workspace
-	CollectionService:AddTag(bottle, REVEAL_TAG)
+	local body = makeThrownItemPhysical(bottle)
+	if not body then
+		bottle:Destroy()
+		addItem(player, "DecoyBottle")
+		sendStatus(player, "Could not throw the bottle.", "sub")
+		return
+	end
 
-	bottle.AssemblyLinearVelocity = (safeDirection * 85) + Vector3.new(0, 18, 0)
-	bottle.AssemblyAngularVelocity = Vector3.new(4, 9, 2)
+	bottle:PivotTo(CFrame.new(spawnPosition) * CFrame.Angles(math.rad(-12), math.rad(18), math.rad(20)))
+	body.AssemblyLinearVelocity = (safeDirection * 85) + Vector3.new(0, 18, 0)
+	body.AssemblyAngularVelocity = Vector3.new(4, 9, 2)
 
-	local sound = Instance.new("Sound")
-	sound.Name = "DecoyClatter"
-	sound.SoundId = SOUND_IDS.decoyImpact
-	sound.Volume = 1.1
-	sound.RollOffMaxDistance = 120
-	sound.Parent = bottle
+	local hasShattered = false
+	local thrownAt = os.clock()
+	local touchedConnection: RBXScriptConnection? = nil
 
-	task.delay(0.45, function()
-		if bottle.Parent then
-			sound:Play()
-			serverNoiseEvent:Fire({
-				position = bottle.Position,
-				intensity = 2.2,
-				movementState = "decoy",
-				decay = 9,
-			})
+	local function spawnGlassShard(parent: Instance, position: Vector3, sourceVelocity: Vector3)
+		local shard = Instance.new("Part")
+		shard.Name = "DecoyGlassShard"
+		shard.Anchored = false
+		shard.CanCollide = true
+		shard.CanTouch = false
+		shard.CanQuery = true
+		shard.Size = Vector3.new(
+			0.18 + (math.random() * 0.28),
+			0.04 + (math.random() * 0.08),
+			0.12 + (math.random() * 0.24)
+		)
+		shard.CFrame = CFrame.new(position + Vector3.new(
+			(math.random() - 0.5) * 0.8,
+			math.random() * 0.35,
+			(math.random() - 0.5) * 0.8
+		)) * CFrame.Angles(math.random() * math.pi, math.random() * math.pi, math.random() * math.pi)
+		shard.Material = Enum.Material.Glass
+		shard.Color = Color3.fromRGB(150, 230, 235)
+		shard.Transparency = 0.22
+		shard.Parent = parent
+		shard.AssemblyLinearVelocity = (sourceVelocity * 0.18) + Vector3.new(
+			(math.random() - 0.5) * 24,
+			8 + (math.random() * 16),
+			(math.random() - 0.5) * 24
+		)
+		shard.AssemblyAngularVelocity = Vector3.new(
+			(math.random() - 0.5) * 18,
+			(math.random() - 0.5) * 18,
+			(math.random() - 0.5) * 18
+		)
+		CollectionService:AddTag(shard, REVEAL_TAG)
+	end
+
+	local function shatterDecoy()
+		if hasShattered then return end
+		hasShattered = true
+		if touchedConnection then
+			touchedConnection:Disconnect()
+			touchedConnection = nil
+		end
+
+		local impactPosition = body.Position
+		local impactVelocity = body.AssemblyLinearVelocity
+		bottle:Destroy()
+
+		local shardFolder = Instance.new("Folder")
+		shardFolder.Name = "DecoyBottleShards"
+		shardFolder.Parent = workspace
+		for _ = 1, DECOY_SHARD_COUNT do
+			spawnGlassShard(shardFolder, impactPosition, impactVelocity)
+		end
+
+		playAnchoredWorldSound(impactPosition, "DecoyShatter", SOUND_IDS.decoyShatter, 1.1, 120)
+		serverNoiseEvent:Fire({
+			position = impactPosition,
+			intensity = 2.2,
+			movementState = "decoy",
+			decay = 9,
+		})
+
+		Debris:AddItem(shardFolder, 5)
+	end
+
+	touchedConnection = body.Touched:Connect(function(hit)
+		if hasShattered or os.clock() - thrownAt < 0.15 then return end
+		if not hit or not hit.Parent then return end
+		if hit:IsDescendantOf(bottle) then return end
+		if character and hit:IsDescendantOf(character) then return end
+		shatterDecoy()
+	end)
+
+	task.delay(DECOY_SHATTER_FALLBACK_SECONDS, function()
+		if bottle.Parent and not hasShattered then
+			shatterDecoy()
 		end
 	end)
 
@@ -646,6 +1429,7 @@ function ObjectiveSystem.init()
 	end)
 
 	Players.PlayerRemoving:Connect(function(player)
+		cancelRepair(player)
 		if objectiveState.fuseHolder == player then
 			objectiveState.fuseHolder = nil
 			if not objectiveState.repaired then
@@ -656,8 +1440,16 @@ function ObjectiveSystem.init()
 		inventories[player] = nil
 	end)
 
-	objectiveEvent.OnServerEvent:Connect(function(player, objectiveName)
+	objectiveEvent.OnServerEvent:Connect(function(player, objectiveName, action)
 		if typeof(objectiveName) ~= "string" then return end
+		if objectiveName == "RepairPanel" and action == "BeginRepair" then
+			beginRepair(player)
+			return
+		elseif objectiveName == "RepairPanel" and action == "CancelRepair" then
+			cancelRepair(player)
+			return
+		end
+
 		interact(player, objectiveName)
 	end)
 

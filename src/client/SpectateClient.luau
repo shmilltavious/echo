@@ -4,9 +4,12 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 
+local Flashlight = require(script.Parent.Flashlight)
+
 local player = Players.LocalPlayer
 local active = false
 local currentIndex = 1
+local currentTarget: Player? = nil
 local renderConnection: RBXScriptConnection? = nil
 local inputConnection: RBXScriptConnection? = nil
 local screenGui: ScreenGui? = nil
@@ -24,6 +27,19 @@ local function getSpectateTargets()
 		end
 	end
 	return targets
+end
+
+local function isValidSpectateTarget(targetPlayer: Player?): boolean
+	if not targetPlayer or targetPlayer.Parent ~= Players then
+		return false
+	end
+	if targetPlayer == player or targetPlayer:GetAttribute("Escaped") == true then
+		return false
+	end
+
+	local character = targetPlayer.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	return humanoid ~= nil and humanoid.Health > 0
 end
 
 local function createGui()
@@ -66,30 +82,61 @@ local function setCameraToTarget(targetPlayer)
 	player.CameraMode = Enum.CameraMode.Classic
 	camera.CameraType = Enum.CameraType.Custom
 	camera.CameraSubject = humanoid
+	currentTarget = targetPlayer
 	if targetLabel then
-		targetLabel.Text = "SPECTATING  " .. targetPlayer.Name .. "   TAB TO CYCLE"
+		targetLabel.Text = "SPECTATING  " .. targetPlayer.Name .. "   Q / E / CLICK TO CYCLE"
 	end
 	return true
 end
 
-local function refreshTarget()
+local function selectTarget(index: number): boolean
 	local targets = getSpectateTargets()
 	if #targets == 0 then
+		currentTarget = nil
 		if targetLabel then
 			targetLabel.Text = "NO SURVIVORS REMAIN"
 		end
 		return false
 	end
 
-	currentIndex = ((currentIndex - 1) % #targets) + 1
+	currentIndex = ((index - 1) % #targets) + 1
 	return setCameraToTarget(targets[currentIndex])
+end
+
+local function refreshTarget()
+	if isValidSpectateTarget(currentTarget) then
+		return setCameraToTarget(currentTarget)
+	end
+
+	local targets = getSpectateTargets()
+	if #targets == 0 then
+		currentTarget = nil
+		if targetLabel then
+			targetLabel.Text = "NO SURVIVORS REMAIN"
+		end
+		return false
+	end
+
+	currentIndex = math.clamp(currentIndex, 1, #targets)
+	return selectTarget(currentIndex)
+end
+
+local function cycleTarget(direction: number)
+	if not active then return end
+	selectTarget(currentIndex + direction)
 end
 
 function SpectateClient.start(): boolean
 	active = true
 	createGui()
+	Flashlight.destroy()
 
-	if not refreshTarget() then
+	local targets = getSpectateTargets()
+	if #targets > 0 then
+		currentIndex = math.random(1, #targets)
+	end
+
+	if not selectTarget(currentIndex) then
 		return false
 	end
 
@@ -103,9 +150,12 @@ function SpectateClient.start(): boolean
 	if not inputConnection then
 		inputConnection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
 			if gameProcessed or not active then return end
-			if input.KeyCode == Enum.KeyCode.Tab then
-				currentIndex += 1
-				refreshTarget()
+			if input.KeyCode == Enum.KeyCode.Q then
+				cycleTarget(-1)
+			elseif input.KeyCode == Enum.KeyCode.E or input.KeyCode == Enum.KeyCode.Tab then
+				cycleTarget(1)
+			elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
+				cycleTarget(1)
 			end
 		end)
 	end

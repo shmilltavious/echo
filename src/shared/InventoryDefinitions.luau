@@ -3,6 +3,12 @@ local InventoryDefinitions = {}
 InventoryDefinitions.CAPACITY = 3
 
 InventoryDefinitions.ITEMS = {
+	Flashlight = {
+		id = "Flashlight",
+		name = "Flashlight",
+		weight = 1,
+		color = Color3.fromRGB(208, 205, 190),
+	},
 	Keycard = {
 		id = "Keycard",
 		name = "Keycard",

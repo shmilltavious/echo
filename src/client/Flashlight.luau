@@ -52,6 +52,7 @@ local viewmodelStartAlpha = 1
 local viewmodelTargetAlpha = 1
 local viewmodelAnimationTime = 0
 local viewmodelAnimationDuration = 0
+local viewModelSuppressed = false
 
 local function addTextStroke(label: TextLabel, transparency: number)
 	label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
@@ -343,7 +344,7 @@ local function updateFlashlightTransform(camera: Camera, dt: number)
 		end
 	end
 
-	local shouldShowViewModel = viewmodelAlpha > 0.01 or viewmodelTargetAlpha > 0
+	local shouldShowViewModel = not viewModelSuppressed and (viewmodelAlpha > 0.01 or viewmodelTargetAlpha > 0)
 	setViewModelParent(if shouldShowViewModel then camera else nil)
 	local animatedOffset = getAnimatedViewModelOffset()
 
@@ -498,7 +499,7 @@ end
 
 -- Toggle flashlight on/off
 function Flashlight.toggle()
-	if isDead then return end
+	if isDead or viewModelSuppressed then return end
 	local now = os.clock()
 	if now - lastToggleTime < TOGGLE_COOLDOWN or viewmodelAlpha ~= viewmodelTargetAlpha then
 		return
@@ -512,6 +513,13 @@ function Flashlight.toggle()
 
 	print("🔦 Flashlight", if isOn then "ON" else "OFF")
 	Flashlight.updateHUD()
+end
+
+function Flashlight.setViewModelSuppressed(suppressed: boolean)
+	viewModelSuppressed = suppressed == true
+	if viewModelSuppressed then
+		setViewModelParent(nil)
+	end
 end
 
 -- Initialize the flashlight system
