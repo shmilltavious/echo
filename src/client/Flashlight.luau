@@ -4,21 +4,41 @@ local Flashlight = {}
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
+local SoundService = game:GetService("SoundService")
+local Debris = game:GetService("Debris")
 
 -- Constants
 local MAX_BATTERY = 60 -- 60 seconds of total flashlight usage
-local FULL_BRIGHTNESS = 8
-local FULL_RANGE = 44
-local CLOSE_FILL_BRIGHTNESS = 0.75
-local CLOSE_FILL_RANGE = 12
-local SPOT_ANGLE = 58
+local FULL_BRIGHTNESS = 5.25
+local FULL_RANGE = 40
+local CLOSE_FILL_BRIGHTNESS = 0.55
+local CLOSE_FILL_RANGE = 10
+local SURFACE_FILL_BRIGHTNESS = 1.05
+local SURFACE_FILL_RANGE = 16
+local SPOT_ANGLE = 54
 local DIMMING_THRESHOLD = 12 -- last 12 seconds = dimming phase
+local VIEWMODEL_TEMPLATE_NAME = "Flashlight"
+local VIEWMODEL_SCALE = 0.14
+local VIEWMODEL_OFFSET = CFrame.new(0.58, -0.66, -1.12) * CFrame.Angles(math.rad(-4), math.rad(92), math.rad(-9))
+local VIEWMODEL_HIDDEN_OFFSET = CFrame.new(0.34, -1.18, 0.48) * CFrame.Angles(math.rad(22), math.rad(-12), math.rad(-18))
+local LIGHT_EMITTER_OFFSET = CFrame.new(0.44, -0.52, -1.58)
+local HAND_SKIN_COLOR = Color3.fromRGB(180, 132, 96)
+local SLEEVE_COLOR = Color3.fromRGB(34, 35, 38)
+local EQUIP_ANIMATION_TIME = 0.38
+local UNEQUIP_ANIMATION_TIME = 0.3
+local TOGGLE_COOLDOWN = 0.32
+local FLASHLIGHT_CLICK_SOUND_ID = "rbxasset://sounds/switch.wav"
 
 -- State
 local battery = MAX_BATTERY
 local flashlightPart: Part? = nil
+local flashlightViewModel: Model? = nil
+local handViewModel: Model? = nil
+local handParts = {}
 local flashlightSpot: SpotLight? = nil
 local flashlightFill: PointLight? = nil
+local surfaceFillPart: Part? = nil
+local surfaceFillLight: PointLight? = nil
 local batteryConnection: RBXScriptConnection? = nil
 local isDead = false
 local isOn = true
@@ -26,18 +46,235 @@ local hudFrame: Frame? = nil
 local hudStatus: TextLabel? = nil
 local hudBatteryText: TextLabel? = nil
 local hudBatteryFill: Frame? = nil
+local lastToggleTime = -math.huge
+local viewmodelAlpha = 1
+local viewmodelStartAlpha = 1
+local viewmodelTargetAlpha = 1
+local viewmodelAnimationTime = 0
+local viewmodelAnimationDuration = 0
 
 local function addTextStroke(label: TextLabel, transparency: number)
 	label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
 	label.TextStrokeTransparency = transparency
 end
 
--- Create the flashlight as local lights that follow the camera.
-function Flashlight.createFlashlight(): (Part, SpotLight)
+local function smoothStep(alpha: number): number
+	local clamped = math.clamp(alpha, 0, 1)
+	return clamped * clamped * (3 - (2 * clamped))
+end
+
+local function setViewModelParent(parent: Instance?)
+	if flashlightViewModel and flashlightViewModel.Parent ~= parent then
+		flashlightViewModel.Parent = parent
+	end
+	if handViewModel and handViewModel.Parent ~= parent then
+		handViewModel.Parent = parent
+	end
+end
+
+local function setLightsEnabled(enabled: boolean)
+	if flashlightSpot then
+		flashlightSpot.Enabled = enabled
+	end
+	if flashlightFill then
+		flashlightFill.Enabled = enabled
+	end
+	if surfaceFillLight then
+		surfaceFillLight.Enabled = enabled
+	end
+end
+
+local function playClickSound(turningOn: boolean)
+	local sound = Instance.new("Sound")
+	sound.Name = "FlashlightClick"
+	sound.SoundId = FLASHLIGHT_CLICK_SOUND_ID
+	sound.Volume = 0.14
+	sound.PlaybackSpeed = (if turningOn then 1.04 else 0.92) + (math.random() * 0.04)
+	sound.Parent = SoundService
+	sound:Play()
+	Debris:AddItem(sound, 1.5)
+end
+
+local function startViewModelTransition(show: boolean)
+	viewmodelStartAlpha = viewmodelAlpha
+	viewmodelTargetAlpha = if show then 1 else 0
+	viewmodelAnimationTime = 0
+	viewmodelAnimationDuration = if show then EQUIP_ANIMATION_TIME else UNEQUIP_ANIMATION_TIME
+end
+
+local function updateViewModelAnimation(dt: number)
+	if viewmodelAlpha == viewmodelTargetAlpha then
+		return
+	end
+
+	viewmodelAnimationTime += dt
+	local alpha = smoothStep(viewmodelAnimationTime / math.max(viewmodelAnimationDuration, 0.01))
+	viewmodelAlpha = viewmodelStartAlpha + ((viewmodelTargetAlpha - viewmodelStartAlpha) * alpha)
+
+	if viewmodelAnimationTime >= viewmodelAnimationDuration then
+		viewmodelAlpha = viewmodelTargetAlpha
+	end
+end
+
+local function getAnimatedViewModelOffset(): CFrame
+	local pose = VIEWMODEL_HIDDEN_OFFSET:Lerp(CFrame.identity, smoothStep(viewmodelAlpha))
+	if viewmodelAnimationTime > 0 and viewmodelAnimationTime < viewmodelAnimationDuration then
+		local phase = math.clamp(viewmodelAnimationTime / viewmodelAnimationDuration, 0, 1)
+		local flick = math.sin(phase * math.pi)
+		local direction = if viewmodelTargetAlpha > viewmodelStartAlpha then 1 else -1
+		pose *= CFrame.new(0, 0.03 * flick, -0.04 * flick * direction)
+			* CFrame.Angles(math.rad(-5 * flick * direction), math.rad(2 * flick), math.rad(5 * flick * direction))
+	end
+
+	return pose
+end
+
+local function prepareViewModel(model: Model)
+	for _, descendant in ipairs(model:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.Anchored = true
+			descendant.CanCollide = false
+			descendant.CanQuery = false
+			descendant.CanTouch = false
+			descendant.CastShadow = false
+			descendant.Massless = true
+		elseif descendant:IsA("Script") or descendant:IsA("LocalScript") then
+			descendant:Destroy()
+		end
+	end
+end
+
+local function createFlashlightViewModel(camera: Camera?): Model?
+	local template = workspace:FindFirstChild(VIEWMODEL_TEMPLATE_NAME)
+	if not (template and template:IsA("Model")) then
+		warn("Workspace.Flashlight model not found. Falling back to light-only flashlight.")
+		return nil
+	end
+
+	local viewModel = template:Clone()
+	viewModel.Name = "FirstPersonFlashlight"
+	prepareViewModel(viewModel)
+
+	local scaled = pcall(function()
+		viewModel:ScaleTo(VIEWMODEL_SCALE)
+	end)
+	if not scaled then
+		warn("Unable to scale flashlight viewmodel; using authored size.")
+	end
+
+	viewModel.Parent = camera or workspace
+	return viewModel
+end
+
+local function createHandPart(name: string, shape: Enum.PartType, size: Vector3, color: Color3, offset: CFrame): Part
 	local part = Instance.new("Part")
-	part.Name = "Flashlight"
+	part.Name = name
+	part.Shape = shape
+	part.Size = size
+	part.Color = color
+	part.Material = Enum.Material.SmoothPlastic
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	part.CastShadow = false
+	part.Massless = true
+	part.Parent = handViewModel
+	table.insert(handParts, {
+		part = part,
+		offset = offset,
+	})
+	return part
+end
+
+local function createHandViewModel(camera: Camera?): Model
+	local model = Instance.new("Model")
+	model.Name = "FirstPersonFlashlightHand"
+	model.Parent = camera or workspace
+	handViewModel = model
+	table.clear(handParts)
+
+	createHandPart(
+		"Sleeve",
+		Enum.PartType.Block,
+		Vector3.new(0.22, 0.2, 0.28),
+		SLEEVE_COLOR,
+		CFrame.new(0.88, -1.1, -0.54) * CFrame.Angles(math.rad(-18), math.rad(-10), math.rad(8))
+	)
+	createHandPart(
+		"Forearm",
+		Enum.PartType.Block,
+		Vector3.new(0.16, 0.16, 0.32),
+		HAND_SKIN_COLOR,
+		CFrame.new(0.74, -0.92, -0.78) * CFrame.Angles(math.rad(-18), math.rad(-14), math.rad(8))
+	)
+	createHandPart(
+		"Hand",
+		Enum.PartType.Ball,
+		Vector3.new(0.22, 0.17, 0.18),
+		HAND_SKIN_COLOR,
+		CFrame.new(0.58, -0.7, -1.1) * CFrame.Angles(math.rad(-6), math.rad(-18), math.rad(4))
+	)
+	createHandPart(
+		"Thumb",
+		Enum.PartType.Block,
+		Vector3.new(0.07, 0.09, 0.14),
+		HAND_SKIN_COLOR,
+		CFrame.new(0.46, -0.69, -1.05) * CFrame.Angles(math.rad(18), math.rad(28), math.rad(-12))
+	)
+
+	return model
+end
+
+local function disableLocalCharacterShadows(character: Model)
+	for _, descendant in ipairs(character:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.CastShadow = false
+		end
+	end
+
+	character.DescendantAdded:Connect(function(descendant)
+		if descendant:IsA("BasePart") then
+			descendant.CastShadow = false
+		end
+	end)
+end
+
+local function createSurfaceFillLight(): (Part, PointLight)
+	local part = Instance.new("Part")
+	part.Name = "FlashlightSurfaceFillEmitter"
+	part.Shape = Enum.PartType.Ball
+	part.Size = Vector3.new(0.16, 0.16, 0.16)
+	part.Transparency = 1
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	part.CastShadow = false
+	part.Parent = workspace
+
+	local light = Instance.new("PointLight")
+	light.Name = "FlashlightSurfaceFill"
+	light.Brightness = SURFACE_FILL_BRIGHTNESS
+	light.Range = SURFACE_FILL_RANGE
+	light.Shadows = false
+	light.Color = Color3.fromRGB(255, 240, 210)
+	light.Enabled = isOn
+	light.Parent = part
+
+	return part, light
+end
+
+-- Create the held local flashlight and lights that follow its muzzle.
+function Flashlight.createFlashlight(): (Part, SpotLight)
+	local camera = workspace.CurrentCamera
+	flashlightViewModel = createFlashlightViewModel(camera)
+	createHandViewModel(camera)
+
+	local part = Instance.new("Part")
+	part.Name = "FlashlightEmitter"
 	part.Shape = Enum.PartType.Block
-	part.Size = Vector3.new(0.2, 0.2, 0.2)
+	part.Size = Vector3.new(0.12, 0.12, 0.12)
 	part.Transparency = 1 -- invisible
 	part.CanCollide = false
 	part.CanQuery = false
@@ -53,7 +290,7 @@ function Flashlight.createFlashlight(): (Part, SpotLight)
 	spotLight.Angle = SPOT_ANGLE
 	spotLight.Shadows = true
 	spotLight.Color = Color3.fromRGB(255, 245, 220) -- Warm white
-	spotLight.Face = Enum.NormalId.Front -- Shines forward from camera
+	spotLight.Face = Enum.NormalId.Front
 	spotLight.Parent = part
 
 	local fillLight = Instance.new("PointLight")
@@ -64,8 +301,60 @@ function Flashlight.createFlashlight(): (Part, SpotLight)
 	fillLight.Color = Color3.fromRGB(255, 240, 210)
 	fillLight.Parent = part
 	flashlightFill = fillLight
+	surfaceFillPart, surfaceFillLight = createSurfaceFillLight()
 
 	return part, spotLight
+end
+
+local function updateFlashlightTransform(camera: Camera, dt: number)
+	updateViewModelAnimation(dt)
+
+	if flashlightPart then
+		if flashlightPart.Parent ~= workspace then
+			flashlightPart.Parent = workspace
+		end
+		flashlightPart.CFrame = camera.CFrame * LIGHT_EMITTER_OFFSET
+	end
+
+	if surfaceFillPart and surfaceFillLight then
+		if isOn and not isDead then
+			local params = RaycastParams.new()
+			params.FilterType = Enum.RaycastFilterType.Exclude
+			local ignored = { flashlightPart, surfaceFillPart, flashlightViewModel, handViewModel }
+			local character = Players.LocalPlayer.Character
+			if character then
+				table.insert(ignored, character)
+			end
+			params.FilterDescendantsInstances = ignored
+			params.IgnoreWater = true
+
+			local result = workspace:Raycast(camera.CFrame.Position, camera.CFrame.LookVector * FULL_RANGE, params)
+			if result then
+				local distanceAlpha = math.clamp(1 - (result.Distance / FULL_RANGE), 0, 1)
+				surfaceFillPart.Position = result.Position + (result.Normal * 0.18)
+				surfaceFillLight.Enabled = true
+				surfaceFillLight.Brightness = SURFACE_FILL_BRIGHTNESS * (0.35 + (distanceAlpha * 0.65))
+				surfaceFillLight.Range = SURFACE_FILL_RANGE * (0.55 + (distanceAlpha * 0.45))
+			else
+				surfaceFillLight.Enabled = false
+			end
+		else
+			surfaceFillLight.Enabled = false
+		end
+	end
+
+	local shouldShowViewModel = viewmodelAlpha > 0.01 or viewmodelTargetAlpha > 0
+	setViewModelParent(if shouldShowViewModel then camera else nil)
+	local animatedOffset = getAnimatedViewModelOffset()
+
+	if flashlightViewModel and flashlightViewModel.Parent then
+		flashlightViewModel:PivotTo(camera.CFrame * animatedOffset * VIEWMODEL_OFFSET)
+	end
+	for _, data in ipairs(handParts) do
+		if data.part and data.part.Parent then
+			data.part.CFrame = camera.CFrame * animatedOffset * data.offset
+		end
+	end
 end
 
 -- Create HUD in bottom-right corner
@@ -210,15 +499,16 @@ end
 -- Toggle flashlight on/off
 function Flashlight.toggle()
 	if isDead then return end
+	local now = os.clock()
+	if now - lastToggleTime < TOGGLE_COOLDOWN or viewmodelAlpha ~= viewmodelTargetAlpha then
+		return
+	end
+	lastToggleTime = now
 
 	isOn = not isOn
-
-	if flashlightSpot then
-		flashlightSpot.Enabled = isOn
-	end
-	if flashlightFill then
-		flashlightFill.Enabled = isOn
-	end
+	playClickSound(isOn)
+	setLightsEnabled(isOn)
+	startViewModelTransition(isOn)
 
 	print("🔦 Flashlight", if isOn then "ON" else "OFF")
 	Flashlight.updateHUD()
@@ -229,6 +519,12 @@ function Flashlight.init()
 	print("🔦 Flashlight initializing...")
 
 	flashlightPart, flashlightSpot = Flashlight.createFlashlight()
+
+	local player = Players.LocalPlayer
+	if player.Character then
+		disableLocalCharacterShadows(player.Character)
+	end
+	player.CharacterAdded:Connect(disableLocalCharacterShadows)
 
 	-- Create HUD
 	Flashlight.createHUD()
@@ -247,7 +543,7 @@ function Flashlight.init()
 	batteryConnection = RunService.RenderStepped:Connect(function(dt)
 		local camera = workspace.CurrentCamera
 		if flashlightPart and camera then
-			flashlightPart.CFrame = camera.CFrame * CFrame.new(0.35, -0.2, -0.85)
+			updateFlashlightTransform(camera, dt)
 		end
 
 		Flashlight.updateBattery(dt)
@@ -288,12 +584,10 @@ function Flashlight.updateBattery(dt: number)
 				flashlightFill.Range = CLOSE_FILL_RANGE
 			end
 		elseif battery <= 0 then
-			flashlightSpot.Enabled = false
-			if flashlightFill then
-				flashlightFill.Enabled = false
-			end
+			setLightsEnabled(false)
 			isDead = true
 			isOn = false
+			startViewModelTransition(false)
 			Flashlight.updateHUD()
 			print("🔋 Flashlight battery depleted!")
 		end
@@ -312,6 +606,20 @@ function Flashlight.destroy()
 		flashlightSpot = nil
 		flashlightFill = nil
 	end
+	if surfaceFillPart then
+		surfaceFillPart:Destroy()
+		surfaceFillPart = nil
+		surfaceFillLight = nil
+	end
+	if flashlightViewModel then
+		flashlightViewModel:Destroy()
+		flashlightViewModel = nil
+	end
+	if handViewModel then
+		handViewModel:Destroy()
+		handViewModel = nil
+	end
+	table.clear(handParts)
 	if hudFrame then
 		hudFrame.Parent = nil
 		hudFrame:Destroy()

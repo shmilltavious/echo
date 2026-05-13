@@ -14,6 +14,7 @@ local ATTACK_RANGE = 5.5
 local TOUCH_ATTACK_RANGE = 2.35
 local STILL_SURVIVE_TIME = 1.35
 local CATCH_COOLDOWN = 4
+local COOP_VISUAL_THRESHOLD = 0.025
 local NOISE_REACTIONS = {
 	crouch = {
 		hearThreshold = 0.55,
@@ -148,6 +149,31 @@ local function setChaseSpeeds(reaction, intensity)
 
 	chaseBaseSpeed = math.clamp(baseSpeed + (urgency * 0.8), PATROL_SPEED, maxSpeed)
 	chaseMaxSpeed = math.max(chaseBaseSpeed, maxSpeed + (urgency * 0.6))
+end
+
+local function broadcastCoopPulse(sourcePlayer, rootPosition: Vector3, noise)
+	local visualIntensity = math.clamp(tonumber(noise.visualIntensity) or 0, 0, 5)
+	local radius = math.clamp(tonumber(noise.radius) or 0, 0, 64)
+	if visualIntensity < COOP_VISUAL_THRESHOLD or radius <= 0 then
+		return
+	end
+
+	local payload = {
+		type = "CoopEcholocationPulse",
+		sourceUserId = sourcePlayer.UserId,
+		position = rootPosition,
+		intensity = visualIntensity,
+		radius = radius,
+		movementState = noise.movementState,
+		hasVoice = noise.hasVoice,
+		voiceVolume = math.clamp(tonumber(noise.voiceVolume) or 0, 0, 1),
+	}
+
+	for _, otherPlayer in ipairs(Players:GetPlayers()) do
+		if otherPlayer ~= sourcePlayer then
+			pulseEvent:FireClient(otherPlayer, payload)
+		end
+	end
 end
 
 local function getSpawnCFrame()
@@ -360,12 +386,14 @@ pulseEvent.OnServerEvent:Connect(function(player, report)
 	local noise = normalizeNoiseReport(report)
 	updatePlayerNoiseState(player, noise)
 
+	local char = player.Character
+	if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+
+	broadcastCoopPulse(player, char.HumanoidRootPart.Position, noise)
+
 	local reaction = getNoiseReaction(noise)
 	local hearThreshold = reaction.hearThreshold or HEAR_THRESHOLD
 	if noise.intensity < hearThreshold then return end
-
-	local char = player.Character
-	if not char or not char:FindFirstChild("HumanoidRootPart") then return end
 
 	lastNoisePosition = char.HumanoidRootPart.Position
 	lastNoiseTime = os.clock()

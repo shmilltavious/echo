@@ -20,7 +20,13 @@ local isSprinting = false
 local jumpNoiseUntil = 0
 local lastReportTime = 0
 local REPORT_RATE = 0.1
-local NOISE_THRESHOLD = 0.08
+local NOISE_THRESHOLD = 0.025
+local VOICE_ACTIVITY_THRESHOLD = 0.008
+local MIC_GAIN = 42
+local MIC_NOISE_FLOOR = 0.0002
+local MIC_RESPONSE_POWER = 0.72
+local MOVEMENT_VISUAL_INTENSITY_SCALE = 0.3
+local MOVEMENT_VISUAL_RADIUS_SCALE = 0.3
 local DEFAULT_WALK_SPEED = 12
 
 local currentNoise = {
@@ -77,14 +83,16 @@ end
 local function calculateNoise(humanoid: Humanoid?)
 	local movementState = getMovementState(humanoid)
 	local movementTier = Constants.MOVEMENT_NOISE[movementState] or Constants.MOVEMENT_NOISE.idle
+	local movementVisualIntensity = movementTier.intensity * MOVEMENT_VISUAL_INTENSITY_SCALE
+	local movementVisualRadius = movementTier.radius * MOVEMENT_VISUAL_RADIUS_SCALE
 	local voiceIntensity = micVolume * Constants.VOICE_NOISE.intensityMultiplier
 	local voiceRadius = micVolume * Constants.VOICE_NOISE.radiusMultiplier
 	local voiceRisk = voiceIntensity * Constants.VOICE_NOISE.monsterRiskMultiplier
-	local hasVoice = micVolume > 0.03
+	local hasVoice = micVolume > VOICE_ACTIVITY_THRESHOLD
 
 	currentNoise = {
-		intensity = math.clamp(movementTier.intensity + voiceIntensity, 0, 5),
-		radius = math.clamp(movementTier.radius + voiceRadius, 0, Constants.SPHERE_MAX_RADIUS),
+		intensity = math.clamp(movementVisualIntensity + voiceIntensity, 0, 5),
+		radius = math.clamp(movementVisualRadius + voiceRadius, 0, Constants.SPHERE_MAX_RADIUS),
 		monsterRisk = math.clamp(movementTier.monsterRisk + voiceRisk, 0, 6),
 		movementState = movementState,
 		hasVoice = hasVoice,
@@ -93,45 +101,19 @@ local function calculateNoise(humanoid: Humanoid?)
 end
 
 local function updatePulseSphere(rootPart: BasePart)
-	local totalNoise = currentNoise.intensity
-	if totalNoise > NOISE_THRESHOLD then
-		if not activePulseSphere then
-			activePulseSphere = Instance.new("Part")
-			activePulseSphere.Name = "ActiveEcholocation"
-			activePulseSphere.Shape = Enum.PartType.Ball
-			activePulseSphere.CanCollide = false
-			activePulseSphere.CanQuery = false
-			activePulseSphere.Anchored = true
-			activePulseSphere.Material = Enum.Material.ForceField
-			activePulseSphere.Color = Color3.fromRGB(200, 200, 200)
-			activePulseSphere.Size = Vector3.new(0, 0, 0)
-			activePulseSphere.Parent = workspace.CurrentCamera
-
-			local light = Instance.new("PointLight")
-			light.Name = "PulseLight"
-			light.Shadows = true
-			light.Parent = activePulseSphere
-		end
-
-		activePulseSphere.Position = rootPart.Position
-		local targetSize = Vector3.new(currentNoise.radius, currentNoise.radius, currentNoise.radius)
-		activePulseSphere.Size = activePulseSphere.Size:Lerp(targetSize, 0.15)
-		activePulseSphere.Transparency = math.clamp(0.92 - (currentNoise.voiceVolume * 0.55), 0.35, 0.92)
-
-		local light = activePulseSphere:FindFirstChild("PulseLight")
-		if light then
-			light.Range = currentNoise.radius * 1.1
-			light.Brightness = math.clamp((currentNoise.monsterRisk * 0.2), 0, Constants.MAX_BRIGHTNESS)
-		end
-	elseif activePulseSphere then
-		activePulseSphere.Size = activePulseSphere.Size:Lerp(Vector3.new(0, 0, 0), 0.2)
-		activePulseSphere.Transparency += 0.05
-
-		if activePulseSphere.Size.Magnitude < 0.5 or activePulseSphere.Transparency >= 1 then
-			activePulseSphere:Destroy()
-			activePulseSphere = nil
-		end
+	if activePulseSphere then
+		activePulseSphere:Destroy()
+		activePulseSphere = nil
 	end
+end
+
+local function calculateMicVolume(rawLevel: number): number
+	local adjustedLevel = math.max(rawLevel - MIC_NOISE_FLOOR, 0) * MIC_GAIN
+	if adjustedLevel <= 0 then
+		return 0
+	end
+
+	return math.clamp(adjustedLevel ^ MIC_RESPONSE_POWER, 0, 1)
 end
 
 local function setupVoiceInput()
@@ -206,7 +188,7 @@ function InputHandler.init()
 		end
 
 		if audioAnalyzer then
-			micVolume = math.clamp(audioAnalyzer.RmsLevel * 15, 0, 1)
+			micVolume = calculateMicVolume(audioAnalyzer.RmsLevel)
 		else
 			micVolume = 0
 		end

@@ -97,18 +97,74 @@ local function ensureMap()
 	return map
 end
 
-local function makePart(parent, name, position, size, color, material, legacyName)
-	local existing = parent:FindFirstChild(name, true) or workspace:FindFirstChild(name, true)
-	if existing and existing:IsA("BasePart") then
-		return existing
+local function getBasePartFromCandidate(candidate: Instance?, objectiveName: string): BasePart?
+	if not candidate then
+		return nil
+	end
+	if candidate:IsA("BasePart") then
+		return candidate
+	end
+	if candidate:IsA("Model") then
+		if candidate.PrimaryPart then
+			return candidate.PrimaryPart
+		end
+
+		local interactName = interactPartNames[objectiveName]
+		local interactPart = interactName and candidate:FindFirstChild(interactName, true)
+		if interactPart and interactPart:IsA("BasePart") then
+			return interactPart
+		end
 	end
 
-	if legacyName then
-		local legacy = parent:FindFirstChild(legacyName, true) or workspace:FindFirstChild(legacyName, true)
-		if legacy and legacy:IsA("BasePart") then
-			legacy.Name = name
-			return legacy
+	local namedPart = candidate:FindFirstChild(objectiveName, true)
+	if namedPart and namedPart:IsA("BasePart") then
+		return namedPart
+	end
+
+	for _, descendant in ipairs(candidate:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			return descendant
 		end
+	end
+
+	return nil
+end
+
+local function findAuthoredObjectivePart(objectiveName: string): BasePart?
+	for _, instance in ipairs(CollectionService:GetTagged(OBJECTIVE_TAG)) do
+		if instance:IsDescendantOf(workspace) and instance:GetAttribute("ObjectiveName") == objectiveName then
+			local part = getBasePartFromCandidate(instance, objectiveName)
+			if part then
+				return part
+			end
+		end
+	end
+
+	for _, instance in ipairs(workspace:GetDescendants()) do
+		if instance:GetAttribute("ObjectiveName") == objectiveName then
+			local part = getBasePartFromCandidate(instance, objectiveName)
+			if part then
+				return part
+			end
+		end
+	end
+
+	local interactName = interactPartNames[objectiveName]
+	if interactName then
+		local interactPart = workspace:FindFirstChild(interactName, true)
+		if interactPart and interactPart:IsA("BasePart") then
+			return interactPart
+		end
+	end
+
+	local legacyObjective = workspace:FindFirstChild(objectiveName, true)
+	return getBasePartFromCandidate(legacyObjective, objectiveName)
+end
+
+local function makePart(parent, objectiveName, name, position, size, color, material)
+	local existing = findAuthoredObjectivePart(objectiveName)
+	if existing then
+		return existing
 	end
 
 	local part = Instance.new("Part")
@@ -124,6 +180,7 @@ local function makePart(parent, name, position, size, color, material, legacyNam
 end
 
 local function tagObjective(part, objectiveName)
+	part.Anchored = true
 	CollectionService:AddTag(part, OBJECTIVE_TAG)
 	CollectionService:AddTag(part, REVEAL_TAG)
 	part:SetAttribute("ObjectiveName", objectiveName)
@@ -132,42 +189,28 @@ local function tagObjective(part, objectiveName)
 end
 
 local function findObjectivePart(objectiveName)
-	for _, instance in ipairs(CollectionService:GetTagged(OBJECTIVE_TAG)) do
-		if instance:IsA("BasePart") and instance:GetAttribute("ObjectiveName") == objectiveName then
-			return instance
-		end
-	end
-
-	local map = ensureMap()
-	local interactName = interactPartNames[objectiveName]
-	local directPart = interactName and map:FindFirstChild(interactName, true)
-	if directPart and directPart:IsA("BasePart") then
-		return directPart
-	end
-
-	local legacyPart = map:FindFirstChild(objectiveName)
-	if legacyPart and legacyPart:IsA("BasePart") then
-		return legacyPart
-	end
-
-	return nil
+	return findAuthoredObjectivePart(objectiveName)
 end
 
 local function ensureObjectiveProps()
 	local map = ensureMap()
 
-	local keycard = makePart(map, interactPartNames.Keycard, Vector3.new(80.5, 3, 26), Vector3.new(2, 0.2, 1.2), Color3.fromRGB(45, 170, 255), Enum.Material.Neon, "Keycard")
-	local fuse = makePart(map, interactPartNames.Fuse, Vector3.new(132.5, 3, 13), Vector3.new(1.2, 1.2, 2.5), Color3.fromRGB(255, 210, 70), Enum.Material.Metal, "Fuse")
-	local repairPanel = makePart(map, interactPartNames.RepairPanel, Vector3.new(151.2, 5, -32.5), Vector3.new(4, 6, 0.6), Color3.fromRGB(85, 130, 120), Enum.Material.Metal, "RepairPanel")
-	local escapeDoor = makePart(map, interactPartNames.EscapeDoor, Vector3.new(158.5, 6, 39), Vector3.new(7, 10, 1), Color3.fromRGB(90, 90, 100), Enum.Material.Metal, "EscapeDoor")
-	local decoy = makePart(map, interactPartNames.DecoyBottle, Vector3.new(106.5, 3, -13), Vector3.new(1, 2, 1), Color3.fromRGB(120, 190, 180), Enum.Material.Glass, "DecoyBottle")
-	local landmark = makePart(map, "AudioLandmark", Vector3.new(93.5, 4, -39), Vector3.new(2, 4, 2), Color3.fromRGB(255, 125, 40), Enum.Material.Neon)
+	local keycard = makePart(map, "Keycard", interactPartNames.Keycard, Vector3.new(80.5, 3, 26), Vector3.new(2, 0.2, 1.2), Color3.fromRGB(45, 170, 255), Enum.Material.Neon)
+	local fuse = makePart(map, "Fuse", interactPartNames.Fuse, Vector3.new(132.5, 3, 13), Vector3.new(1.2, 1.2, 2.5), Color3.fromRGB(255, 210, 70), Enum.Material.Metal)
+	local repairPanel = makePart(map, "RepairPanel", interactPartNames.RepairPanel, Vector3.new(151.2, 5, -32.5), Vector3.new(4, 6, 0.6), Color3.fromRGB(85, 130, 120), Enum.Material.Metal)
+	local escapeDoor = makePart(map, "EscapeDoor", interactPartNames.EscapeDoor, Vector3.new(158.5, 6, 39), Vector3.new(7, 10, 1), Color3.fromRGB(90, 90, 100), Enum.Material.Metal)
+	local decoy = makePart(map, "DecoyBottle", interactPartNames.DecoyBottle, Vector3.new(106.5, 3, -13), Vector3.new(1, 2, 1), Color3.fromRGB(120, 190, 180), Enum.Material.Glass)
+	local landmark = makePart(map, "AudioLandmark", "AudioLandmark", Vector3.new(93.5, 4, -39), Vector3.new(2, 4, 2), Color3.fromRGB(255, 125, 40), Enum.Material.Neon)
 
 	keycard.CanCollide = false
 	fuse.CanCollide = false
 	decoy.CanCollide = false
-	escapeDoor:SetAttribute("ClosedPosition", escapeDoor.Position)
-	escapeDoor:SetAttribute("OpenPosition", escapeDoor.Position + Vector3.new(0, 12, 0))
+	if escapeDoor:GetAttribute("ClosedPosition") == nil then
+		escapeDoor:SetAttribute("ClosedPosition", escapeDoor.Position)
+	end
+	if escapeDoor:GetAttribute("OpenPosition") == nil then
+		escapeDoor:SetAttribute("OpenPosition", escapeDoor.Position + Vector3.new(0, 12, 0))
+	end
 
 	for _, part in ipairs({ keycard, fuse, repairPanel, escapeDoor, decoy, landmark }) do
 		CollectionService:AddTag(part, REVEAL_TAG)
@@ -213,11 +256,55 @@ local function isCloseEnough(player, part)
 	return (rootPart.Position - part.Position).Magnitude <= INTERACT_RANGE
 end
 
-local function setCollected(part)
-	part.Transparency = 1
-	part.CanCollide = false
-	part.CanTouch = false
+local function getCollectibleRoot(part: BasePart, objectiveName: string): Instance
+	local current = part.Parent
+	while current and current ~= workspace do
+		if current:IsA("Model") and (current.Name == objectiveName or current:GetAttribute("ObjectiveName") == objectiveName) then
+			return current
+		end
+		current = current.Parent
+	end
+
+	return part
+end
+
+local function hideCollectedInstance(instance: Instance)
+	if instance:IsA("BasePart") then
+		instance.Transparency = 1
+		instance.CanCollide = false
+		instance.CanTouch = false
+		instance.CanQuery = false
+		instance:SetAttribute("Collected", true)
+	elseif instance:IsA("Decal") or instance:IsA("Texture") then
+		instance.Transparency = 1
+	elseif instance:IsA("SurfaceGui") or instance:IsA("BillboardGui") then
+		instance.Enabled = false
+	elseif instance:IsA("Highlight") or instance:IsA("SelectionBox") then
+		instance:Destroy()
+	end
+
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.Transparency = 1
+			descendant.CanCollide = false
+			descendant.CanTouch = false
+			descendant.CanQuery = false
+			descendant:SetAttribute("Collected", true)
+		elseif descendant:IsA("Decal") or descendant:IsA("Texture") then
+			descendant.Transparency = 1
+		elseif descendant:IsA("SurfaceGui") or descendant:IsA("BillboardGui") then
+			descendant.Enabled = false
+		elseif descendant:IsA("Highlight") or descendant:IsA("SelectionBox") then
+			descendant:Destroy()
+		end
+	end
+end
+
+local function setCollected(part: BasePart, objectiveName: string)
+	local root = getCollectibleRoot(part, objectiveName)
+	hideCollectedInstance(root)
 	part:SetAttribute("Collected", true)
+	root:SetAttribute("Collected", true)
 end
 
 local function interact(player, objectiveName)
@@ -231,7 +318,7 @@ local function interact(player, objectiveName)
 		if state.hasKeycard then return end
 		state.hasKeycard = true
 		playWorldSound(part, "ObjectivePickup", SOUND_IDS.pickup, 0.45, 45)
-		setCollected(part)
+		setCollected(part, objectiveName)
 		sendStatus(player, "Find the fuse.", "main")
 		sendStatus(player, "Keycard acquired.", "sub")
 	elseif objectiveName == "Fuse" then
@@ -242,7 +329,7 @@ local function interact(player, objectiveName)
 		if state.hasFuse then return end
 		state.hasFuse = true
 		playWorldSound(part, "ObjectivePickup", SOUND_IDS.pickup, 0.45, 45)
-		setCollected(part)
+		setCollected(part, objectiveName)
 		sendStatus(player, "Restore power at the repair panel.", "main")
 		sendStatus(player, "Fuse acquired.", "sub")
 	elseif objectiveName == "RepairPanel" then
@@ -277,7 +364,7 @@ local function interact(player, objectiveName)
 	elseif objectiveName == "DecoyBottle" then
 		state.decoys += 1
 		playWorldSound(part, "ObjectivePickup", SOUND_IDS.pickup, 0.4, 45)
-		setCollected(part)
+		setCollected(part, objectiveName)
 		sendStatus(player, "Decoy bottle acquired. Press G to throw it.", "sub")
 	end
 end

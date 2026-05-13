@@ -1,6 +1,18 @@
 -- Shared logic for sphere-based detection and wall interactions
 local SphereDetection = {}
 
+function SphereDetection.getDistanceFromPart(point: Vector3, part: BasePart): number
+	local localPoint = part.CFrame:PointToObjectSpace(point)
+	local halfSize = part.Size * 0.5
+	local closestLocalPoint = Vector3.new(
+		math.clamp(localPoint.X, -halfSize.X, halfSize.X),
+		math.clamp(localPoint.Y, -halfSize.Y, halfSize.Y),
+		math.clamp(localPoint.Z, -halfSize.Z, halfSize.Z)
+	)
+	local closestWorldPoint = part.CFrame:PointToWorldSpace(closestLocalPoint)
+	return (closestWorldPoint - point).Magnitude
+end
+
 -- Check if a point is within a sphere
 function SphereDetection.isPointInSphere(sphereCenter: Vector3, sphereRadius: number, point: Vector3): boolean
 	local distance = (point - sphereCenter).Magnitude
@@ -17,9 +29,8 @@ function SphereDetection.getWallsTouchedBySphere(sphereCenter: Vector3, sphereRa
 	
 	for _, wall in pairs(wallFolder:GetDescendants()) do
 		if wall:IsA("BasePart") then
-			local distance = (wall.Position - sphereCenter).Magnitude
-			-- Account for part size when checking collision
-			if distance <= (sphereRadius + wall.Size.Magnitude / 2) then
+			local distance = SphereDetection.getDistanceFromPart(sphereCenter, wall)
+			if distance <= sphereRadius then
 				table.insert(touchedWalls, wall)
 			end
 		end
@@ -32,8 +43,8 @@ function SphereDetection.getPartsTouchedBySphere(sphereCenter: Vector3, sphereRa
 	local touchedParts = {}
 
 	for _, part in ipairs(parts) do
-		local distance = (part.Position - sphereCenter).Magnitude
-		if distance <= (sphereRadius + part.Size.Magnitude / 2) then
+		local distance = SphereDetection.getDistanceFromPart(sphereCenter, part)
+		if distance <= sphereRadius then
 			table.insert(touchedParts, part)
 		end
 	end
