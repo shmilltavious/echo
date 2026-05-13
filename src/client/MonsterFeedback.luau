@@ -6,6 +6,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
 
+local SpectateClient = require(script.Parent.SpectateClient)
+
 local player = Players.LocalPlayer
 local initialized = false
 local caughtEvent = ReplicatedStorage:WaitForChild("MonsterCaughtPlayer", 10)
@@ -134,7 +136,19 @@ local function setTextTransparency(value: number)
 	if statLine then statLine.TextTransparency = value end
 end
 
-local function showOutcome(outcome: string, survivedTime: number?, score: number?)
+local function hideOutcome()
+	if not screenGui or not blackout then return end
+	if title then TweenService:Create(title, TweenInfo.new(0.35), { TextTransparency = 1 }):Play() end
+	if subtitle then TweenService:Create(subtitle, TweenInfo.new(0.35), { TextTransparency = 1 }):Play() end
+	if statLine then TweenService:Create(statLine, TweenInfo.new(0.35), { TextTransparency = 1 }):Play() end
+	TweenService:Create(blackout, TweenInfo.new(0.65), { BackgroundTransparency = 1 }):Play()
+	task.wait(0.7)
+	if screenGui then
+		screenGui.Enabled = false
+	end
+end
+
+local function showOutcome(outcome: string, survivedTime: number?, score: number?, shouldSpectate: boolean?)
 	if not screenGui or not blackout or not title or not subtitle or not statLine then return end
 
 	local redFlash = blackout:FindFirstChild("RedFlash")
@@ -183,17 +197,16 @@ local function showOutcome(outcome: string, survivedTime: number?, score: number
 		TweenService:Create(redFlash, TweenInfo.new(0.34), { BackgroundTransparency = 1 }):Play()
 	end
 
-	if not isWin then
-		task.delay(1.7, function()
-			if not screenGui or not blackout then return end
-			if title then TweenService:Create(title, TweenInfo.new(0.35), { TextTransparency = 1 }):Play() end
-			if subtitle then TweenService:Create(subtitle, TweenInfo.new(0.35), { TextTransparency = 1 }):Play() end
-			if statLine then TweenService:Create(statLine, TweenInfo.new(0.35), { TextTransparency = 1 }):Play() end
-			TweenService:Create(blackout, TweenInfo.new(0.65), { BackgroundTransparency = 1 }):Play()
-			task.wait(0.7)
-			if screenGui then
-				screenGui.Enabled = false
+	if isWin and shouldSpectate then
+		task.delay(1.35, function()
+			local startedSpectating = SpectateClient.start()
+			if startedSpectating then
+				hideOutcome()
 			end
+		end)
+	elseif not isWin then
+		task.delay(1.7, function()
+			hideOutcome()
 		end)
 	end
 end
@@ -218,7 +231,7 @@ function MonsterFeedback.init()
 	if gameOutcomeEvent then
 		gameOutcomeEvent.OnClientEvent:Connect(function(payload)
 			if typeof(payload) ~= "table" then return end
-			showOutcome(tostring(payload.outcome or "win"), tonumber(payload.survivedTime), tonumber(payload.score))
+			showOutcome(tostring(payload.outcome or "win"), tonumber(payload.survivedTime), tonumber(payload.score), payload.spectate == true)
 		end)
 	end
 end

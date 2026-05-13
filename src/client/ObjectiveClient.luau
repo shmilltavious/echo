@@ -232,7 +232,13 @@ local function getCharacterRoot(): BasePart?
 	return character and character:FindFirstChild("HumanoidRootPart")
 end
 
+local function isEscaped(): boolean
+	return player:GetAttribute("Escaped") == true
+end
+
 local function findNearestObjective()
+	if isEscaped() then return nil end
+
 	local rootPart = getCharacterRoot()
 	if not rootPart then return nil end
 
@@ -274,6 +280,10 @@ local function updatePrompt()
 	nearestObjective = findNearestObjective()
 
 	if not promptFrame or not promptTitle or not promptAction then return end
+	if isEscaped() then
+		promptFrame.Visible = false
+		return
+	end
 	if nearestObjective then
 		local camera = workspace.CurrentCamera
 		local rootPart = getCharacterRoot()
@@ -346,6 +356,7 @@ local function showStatus(text, statusType)
 end
 
 local function throwDecoy()
+	if isEscaped() then return end
 	if not decoyThrowEvent then return end
 	local camera = workspace.CurrentCamera
 	local rootPart = getCharacterRoot()
@@ -369,6 +380,7 @@ function ObjectiveClient.init()
 
 	UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		if gameProcessed then return end
+		if isEscaped() then return end
 
 		if input.KeyCode == Enum.KeyCode.E and nearestObjective and objectiveEvent then
 			local objectiveName = nearestObjective:GetAttribute("ObjectiveName") or nearestObjective.Name

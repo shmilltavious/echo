@@ -16,6 +16,7 @@ local hiddenPartState = {}
 
 local SphereVisuals = nil
 local ObjectiveClient = nil
+local InventoryClient = nil
 local CameraEffects = nil
 local MonsterFeedback = nil
 local AudioFeedback = nil
@@ -255,6 +256,18 @@ function Menu.startGame()
 	if ObjectiveClient then
 		task.spawn(function()
 			ObjectiveClient.init()
+		end)
+	end
+
+	if not InventoryClient then
+		local module = getClientModule("InventoryClient")
+		if module then
+			InventoryClient = require(module)
+		end
+	end
+	if InventoryClient then
+		task.spawn(function()
+			InventoryClient.init()
 		end)
 	end
 

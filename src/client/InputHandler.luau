@@ -38,6 +38,19 @@ local currentNoise = {
 	voiceVolume = 0,
 }
 
+local function setSilentNoise()
+	movementSpeed = 0
+	micVolume = 0
+	currentNoise = {
+		intensity = 0,
+		radius = 0,
+		monsterRisk = 0,
+		movementState = "idle",
+		hasVoice = false,
+		voiceVolume = 0,
+	}
+end
+
 function InputHandler.getMovementSpeed(): number
 	return movementSpeed
 end
@@ -176,6 +189,11 @@ function InputHandler.init()
 	setupMovementKeys()
 
 	RunService.RenderStepped:Connect(function()
+		if player:GetAttribute("Escaped") == true then
+			setSilentNoise()
+			return
+		end
+
 		local character = player.Character
 		local rootPart = character and character:FindFirstChild("HumanoidRootPart")
 		local humanoid = character and character:FindFirstChildOfClass("Humanoid")

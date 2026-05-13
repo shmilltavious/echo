@@ -242,6 +242,10 @@ local function resetPlayerAfterCatch(player)
 end
 
 local function catchPlayer(player)
+	if player:GetAttribute("Escaped") == true then
+		return
+	end
+
 	local now = os.clock()
 	if caughtCooldowns[player] and now - caughtCooldowns[player] < CATCH_COOLDOWN then
 		return
@@ -383,6 +387,10 @@ local function followPath(destination, interruptFn, isChasing)
 end
 
 pulseEvent.OnServerEvent:Connect(function(player, report)
+	if player:GetAttribute("Escaped") == true then
+		return
+	end
+
 	local noise = normalizeNoiseReport(report)
 	updatePlayerNoiseState(player, noise)
 
@@ -475,6 +483,10 @@ task.spawn(function()
 		end
 
 		for _, player in ipairs(Players:GetPlayers()) do
+			if player:GetAttribute("Escaped") == true then
+				continue
+			end
+
 			local character = player.Character
 			local playerRoot = character and character:FindFirstChild("HumanoidRootPart")
 			local playerHumanoid = character and character:FindFirstChildOfClass("Humanoid")

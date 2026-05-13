@@ -1,9 +1,12 @@
--- Server-side objective chain and throwable decoy prototype
+-- Server-side objective chain, inventory authority, and throwable decoys
 local ObjectiveSystem = {}
 
 local CollectionService = game:GetService("CollectionService")
 local Debris = game:GetService("Debris")
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local InventoryDefinitions = require(ReplicatedStorage.Shared.InventoryDefinitions)
 
 local OBJECTIVE_TAG = "Objective"
 local REVEAL_TAG = "EcholocationReveal"
@@ -32,6 +35,12 @@ local interactPartNames = {
 }
 
 local playerState = {}
+local inventories = {}
+local objectiveState = {
+	keycardAcquired = false,
+	fuseHolder = nil,
+	repaired = false,
+}
 
 local objectiveEvent = ReplicatedStorage:FindFirstChild("ObjectiveInteract") or Instance.new("RemoteEvent")
 objectiveEvent.Name = "ObjectiveInteract"
@@ -49,6 +58,10 @@ local gameOutcomeEvent = ReplicatedStorage:FindFirstChild("GameOutcome") or Inst
 gameOutcomeEvent.Name = "GameOutcome"
 gameOutcomeEvent.Parent = ReplicatedStorage
 
+local inventoryUpdateEvent = ReplicatedStorage:FindFirstChild("InventoryUpdate") or Instance.new("RemoteEvent")
+inventoryUpdateEvent.Name = "InventoryUpdate"
+inventoryUpdateEvent.Parent = ReplicatedStorage
+
 local serverNoiseEvent = ReplicatedStorage:FindFirstChild("ServerNoiseEvent") or Instance.new("BindableEvent")
 serverNoiseEvent.Name = "ServerNoiseEvent"
 serverNoiseEvent.Parent = ReplicatedStorage
@@ -57,16 +70,87 @@ local function getPlayerState(player)
 	local state = playerState[player]
 	if not state then
 		state = {
-			hasKeycard = false,
-			hasFuse = false,
-			repaired = false,
 			escaped = false,
-			decoys = 0,
 			startedAt = os.clock(),
 		}
 		playerState[player] = state
+		player:SetAttribute("Escaped", false)
 	end
 	return state
+end
+
+local function getInventory(player)
+	local inventory = inventories[player]
+	if not inventory then
+		inventory = {
+			items = {},
+		}
+		inventories[player] = inventory
+	end
+	return inventory
+end
+
+local function getInventoryUsed(player): number
+	local used = 0
+	for _, itemId in ipairs(getInventory(player).items) do
+		used += InventoryDefinitions.getWeight(itemId)
+	end
+	return used
+end
+
+local function getInventoryPayload(player)
+	local payloadItems = {}
+	for _, itemId in ipairs(getInventory(player).items) do
+		local item = InventoryDefinitions.getItem(itemId)
+		table.insert(payloadItems, {
+			id = item.id,
+			name = item.name,
+			weight = InventoryDefinitions.getWeight(itemId),
+		})
+	end
+
+	return {
+		capacity = InventoryDefinitions.CAPACITY,
+		used = getInventoryUsed(player),
+		items = payloadItems,
+	}
+end
+
+local function sendInventory(player)
+	inventoryUpdateEvent:FireClient(player, getInventoryPayload(player))
+end
+
+local function hasItem(player, itemId: string): boolean
+	for _, heldId in ipairs(getInventory(player).items) do
+		if heldId == itemId then
+			return true
+		end
+	end
+	return false
+end
+
+local function addItem(player, itemId: string): boolean
+	local weight = InventoryDefinitions.getWeight(itemId)
+	local used = getInventoryUsed(player)
+	if used + weight > InventoryDefinitions.CAPACITY then
+		return false
+	end
+
+	table.insert(getInventory(player).items, itemId)
+	sendInventory(player)
+	return true
+end
+
+local function removeItem(player, itemId: string): boolean
+	local items = getInventory(player).items
+	for index, heldId in ipairs(items) do
+		if heldId == itemId then
+			table.remove(items, index)
+			sendInventory(player)
+			return true
+		end
+	end
+	return false
 end
 
 local function playWorldSound(parent: Instance, name: string, soundId: string, volume: number, maxDistance: number)
@@ -222,7 +306,7 @@ local function ensureObjectiveProps()
 	tagObjective(decoy, "DecoyBottle")
 	keycard:SetAttribute("EquipSlot", "Inventory")
 	fuse:SetAttribute("EquipSlot", "Inventory")
-	decoy:SetAttribute("EquipSlot", "RightHand")
+	decoy:SetAttribute("EquipSlot", "Inventory")
 	decoy:SetAttribute("ViewModelWhenEquipped", true)
 	decoy:SetAttribute("ViewModelNote", "Replace with a right-hand bottle/tool viewmodel when equipped.")
 	repairPanel:SetAttribute("EquipSlot", "World")
@@ -247,6 +331,17 @@ end
 
 local function sendStatus(player, text, statusType)
 	objectiveStatusEvent:FireClient(player, text, statusType or "sub")
+end
+
+local function broadcastStatus(text, statusType)
+	for _, player in ipairs(Players:GetPlayers()) do
+		sendStatus(player, text, statusType)
+	end
+end
+
+local function isEscaped(player): boolean
+	local state = getPlayerState(player)
+	return state.escaped == true or player:GetAttribute("Escaped") == true
 end
 
 local function isCloseEnough(player, part)
@@ -300,6 +395,32 @@ local function hideCollectedInstance(instance: Instance)
 	end
 end
 
+local function showCollectibleInstance(instance: Instance)
+	if instance:IsA("BasePart") then
+		instance.Transparency = 0
+		instance.CanTouch = true
+		instance.CanQuery = true
+		instance:SetAttribute("Collected", false)
+	elseif instance:IsA("Decal") or instance:IsA("Texture") then
+		instance.Transparency = 0
+	elseif instance:IsA("SurfaceGui") or instance:IsA("BillboardGui") then
+		instance.Enabled = true
+	end
+
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.Transparency = 0
+			descendant.CanTouch = true
+			descendant.CanQuery = true
+			descendant:SetAttribute("Collected", false)
+		elseif descendant:IsA("Decal") or descendant:IsA("Texture") then
+			descendant.Transparency = 0
+		elseif descendant:IsA("SurfaceGui") or descendant:IsA("BillboardGui") then
+			descendant.Enabled = true
+		end
+	end
+end
+
 local function setCollected(part: BasePart, objectiveName: string)
 	local root = getCollectibleRoot(part, objectiveName)
 	hideCollectedInstance(root)
@@ -307,7 +428,74 @@ local function setCollected(part: BasePart, objectiveName: string)
 	root:SetAttribute("Collected", true)
 end
 
+local function restoreCollectible(objectiveName: string)
+	local part = findObjectivePart(objectiveName)
+	if not part then return end
+
+	local root = getCollectibleRoot(part, objectiveName)
+	showCollectibleInstance(root)
+	part:SetAttribute("Collected", false)
+	root:SetAttribute("Collected", false)
+	if objectiveName == "Fuse" then
+		part.CanCollide = false
+	end
+end
+
+local function tryAddInventoryPickup(player, itemId: string): boolean
+	if addItem(player, itemId) then
+		return true
+	end
+
+	local item = InventoryDefinitions.getItem(itemId)
+	sendStatus(player, string.format("Not enough room for %s.", item.name), "sub")
+	return false
+end
+
+local function openEscapeDoor()
+	local door = findObjectivePart("EscapeDoor")
+	if not door then return end
+	door.Position = door:GetAttribute("OpenPosition") or (door.Position + Vector3.new(0, 12, 0))
+	door.CanCollide = false
+end
+
+local function hideEscapedCharacter(player)
+	local character = player.Character
+	if not character then return end
+
+	for _, descendant in ipairs(character:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.Transparency = 1
+			descendant.CanCollide = false
+			descendant.CanTouch = false
+			descendant.CanQuery = false
+		elseif descendant:IsA("Decal") then
+			descendant.Transparency = 1
+		end
+	end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid.WalkSpeed = 0
+		humanoid.JumpPower = 0
+		humanoid.AutoRotate = false
+	end
+end
+
+local function setPlayerEscaped(player)
+	local state = getPlayerState(player)
+	if state.escaped then
+		return false
+	end
+
+	state.escaped = true
+	player:SetAttribute("Escaped", true)
+	hideEscapedCharacter(player)
+	return true
+end
+
 local function interact(player, objectiveName)
+	if isEscaped(player) then return end
+
 	local part = findObjectivePart(objectiveName)
 	if not (part and part:IsA("BasePart")) then return end
 	if not isCloseEnough(player, part) then return end
@@ -315,54 +503,70 @@ local function interact(player, objectiveName)
 	local state = getPlayerState(player)
 
 	if objectiveName == "Keycard" then
-		if state.hasKeycard then return end
-		state.hasKeycard = true
+		if objectiveState.keycardAcquired then
+			sendStatus(player, "The keycard is already gone.", "sub")
+			return
+		end
+		if not tryAddInventoryPickup(player, "Keycard") then return end
+
+		objectiveState.keycardAcquired = true
 		playWorldSound(part, "ObjectivePickup", SOUND_IDS.pickup, 0.45, 45)
 		setCollected(part, objectiveName)
-		sendStatus(player, "Find the fuse.", "main")
-		sendStatus(player, "Keycard acquired.", "sub")
+		broadcastStatus("Find the fuse.", "main")
+		broadcastStatus(player.Name .. " acquired the keycard.", "sub")
 	elseif objectiveName == "Fuse" then
-		if not state.hasKeycard then
+		if not objectiveState.keycardAcquired then
 			sendStatus(player, "The fuse case is locked. Find the keycard.", "sub")
 			return
 		end
-		if state.hasFuse then return end
-		state.hasFuse = true
-		playWorldSound(part, "ObjectivePickup", SOUND_IDS.pickup, 0.45, 45)
-		setCollected(part, objectiveName)
-		sendStatus(player, "Restore power at the repair panel.", "main")
-		sendStatus(player, "Fuse acquired.", "sub")
-	elseif objectiveName == "RepairPanel" then
-		if not state.hasFuse then
-			sendStatus(player, "The panel is dead. Find the fuse.", "sub")
+		if objectiveState.fuseHolder then
+			sendStatus(player, "The fuse is already being carried.", "sub")
 			return
 		end
-		if state.repaired then return end
-		state.repaired = true
+		if not tryAddInventoryPickup(player, "Fuse") then return end
+
+		objectiveState.fuseHolder = player
+		playWorldSound(part, "ObjectivePickup", SOUND_IDS.pickup, 0.45, 45)
+		setCollected(part, objectiveName)
+		broadcastStatus("Restore power at the repair panel.", "main")
+		broadcastStatus(player.Name .. " acquired the fuse.", "sub")
+	elseif objectiveName == "RepairPanel" then
+		if objectiveState.repaired then
+			sendStatus(player, "Power is already restored.", "sub")
+			return
+		end
+		if objectiveState.fuseHolder ~= player or not hasItem(player, "Fuse") then
+			sendStatus(player, "The panel needs the fuse carrier.", "sub")
+			return
+		end
+
+		objectiveState.repaired = true
+		objectiveState.fuseHolder = nil
+		removeItem(player, "Fuse")
 		part.Color = Color3.fromRGB(80, 255, 140)
+		openEscapeDoor()
 		playWorldSound(part, "PanelRepair", SOUND_IDS.panelRepair, 0.75, 65)
-		sendStatus(player, "Reach the escape door.", "main")
-		sendStatus(player, "Power restored.", "sub")
+		broadcastStatus("Reach the escape door.", "main")
+		broadcastStatus("Power restored.", "sub")
 	elseif objectiveName == "EscapeDoor" then
-		if not state.repaired then
+		if not objectiveState.repaired then
 			sendStatus(player, "Escape door is locked. Repair ship systems first.", "sub")
 			return
 		end
-		if state.escaped then return end
-		state.escaped = true
-		part.Position = part:GetAttribute("OpenPosition") or (part.Position + Vector3.new(0, 12, 0))
-		part.CanCollide = false
+		if not setPlayerEscaped(player) then return end
+
 		playWorldSound(part, "EscapeSuccess", SOUND_IDS.escapeSuccess, 0.85, 90)
 		local survivedTime, score = getSurvivalStats(state)
 		gameOutcomeEvent:FireClient(player, {
 			outcome = "win",
 			survivedTime = survivedTime,
 			score = score,
+			spectate = true,
 		})
-		sendStatus(player, "Escape route open.", "main")
-		sendStatus(player, "You survived the prototype.", "sub")
+		sendStatus(player, "You escaped. Spectating survivors.", "main")
 	elseif objectiveName == "DecoyBottle" then
-		state.decoys += 1
+		if not tryAddInventoryPickup(player, "DecoyBottle") then return end
+
 		playWorldSound(part, "ObjectivePickup", SOUND_IDS.pickup, 0.4, 45)
 		setCollected(part, objectiveName)
 		sendStatus(player, "Decoy bottle acquired. Press G to throw it.", "sub")
@@ -370,8 +574,8 @@ local function interact(player, objectiveName)
 end
 
 local function throwDecoy(player, origin, direction)
-	local state = getPlayerState(player)
-	if state.decoys <= 0 then
+	if isEscaped(player) then return end
+	if not hasItem(player, "DecoyBottle") then
 		sendStatus(player, "No decoy bottle available.", "sub")
 		return
 	end
@@ -380,7 +584,10 @@ local function throwDecoy(player, origin, direction)
 	local rootPart = character and character:FindFirstChild("HumanoidRootPart")
 	if not rootPart then return end
 
-	state.decoys -= 1
+	if not removeItem(player, "DecoyBottle") then
+		sendStatus(player, "No decoy bottle available.", "sub")
+		return
+	end
 
 	local safeDirection = if typeof(direction) == "Vector3" and direction.Magnitude > 0 then direction.Unit else rootPart.CFrame.LookVector
 	local spawnPosition = if typeof(origin) == "Vector3" then origin else (rootPart.Position + Vector3.new(0, 2, 0))
@@ -427,6 +634,27 @@ end
 
 function ObjectiveSystem.init()
 	ensureObjectiveProps()
+
+	for _, player in ipairs(Players:GetPlayers()) do
+		getPlayerState(player)
+		sendInventory(player)
+	end
+
+	Players.PlayerAdded:Connect(function(player)
+		getPlayerState(player)
+		sendInventory(player)
+	end)
+
+	Players.PlayerRemoving:Connect(function(player)
+		if objectiveState.fuseHolder == player then
+			objectiveState.fuseHolder = nil
+			if not objectiveState.repaired then
+				restoreCollectible("Fuse")
+			end
+		end
+		playerState[player] = nil
+		inventories[player] = nil
+	end)
 
 	objectiveEvent.OnServerEvent:Connect(function(player, objectiveName)
 		if typeof(objectiveName) ~= "string" then return end
