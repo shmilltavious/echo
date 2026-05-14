@@ -1,6 +1,7 @@
 -- Shared logic for sphere-based detection and wall interactions
 local SphereDetection = {}
 
+-- Returns the shortest world-space distance between a point and a part's bounds.
 function SphereDetection.getDistanceFromPart(point: Vector3, part: BasePart): number
 	local localPoint = part.CFrame:PointToObjectSpace(point)
 	local halfSize = part.Size * 0.5
@@ -13,13 +14,13 @@ function SphereDetection.getDistanceFromPart(point: Vector3, part: BasePart): nu
 	return (closestWorldPoint - point).Magnitude
 end
 
--- Check if a point is within a sphere
+-- Returns whether a world-space point is inside a sphere.
 function SphereDetection.isPointInSphere(sphereCenter: Vector3, sphereRadius: number, point: Vector3): boolean
 	local distance = (point - sphereCenter).Magnitude
 	return distance <= sphereRadius
 end
 
--- Get all walls touched by a sphere
+-- Returns BaseParts under wallFolder intersected by a sphere.
 function SphereDetection.getWallsTouchedBySphere(sphereCenter: Vector3, sphereRadius: number, wallFolder: Folder): {Part}
 	local touchedWalls = {}
 	
@@ -39,6 +40,7 @@ function SphereDetection.getWallsTouchedBySphere(sphereCenter: Vector3, sphereRa
 	return touchedWalls
 end
 
+-- Returns the supplied parts that intersect a sphere.
 function SphereDetection.getPartsTouchedBySphere(sphereCenter: Vector3, sphereRadius: number, parts: {BasePart}): {BasePart}
 	local touchedParts = {}
 
@@ -52,7 +54,7 @@ function SphereDetection.getPartsTouchedBySphere(sphereCenter: Vector3, sphereRa
 	return touchedParts
 end
 
--- Calculate sphere radius based on movement speed and mic volume
+-- Calculates echolocation radius from movement and microphone inputs.
 function SphereDetection.calculateSphereRadius(movementSpeed: number, micVolume: number, constants: {any}): number
 	local speedInfluence = movementSpeed * 0.2
 	local volumeInfluence = micVolume * 55

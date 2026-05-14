@@ -6,51 +6,41 @@ local Debris = game:GetService("Debris")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local Constants = require(ReplicatedStorage.Shared.Constants)
 local InventoryDefinitions = require(ReplicatedStorage.Shared.InventoryDefinitions)
 
-local OBJECTIVE_TAG = "Objective"
-local REVEAL_TAG = "EcholocationReveal"
-local INTERACT_RANGE = 16
-local REPAIR_DURATION = 3
-local FLASHLIGHT_ITEM_ID = "Flashlight"
-local FUSE_BOX_DISCONNECTED_NAME = "Fuse Box (Disconnected)"
-local FUSE_BOX_CONNECTED_NAME = "Fuse Box (Connected)"
-local PROTOTYPE_MAP_NAME = "Prototype_Map"
-local AUTHORED_MAP_NAMES = { "Spaceship_Map", "Map" }
-local SOUND_IDS = {
-	pickup = "rbxassetid://9112854440",
-	panelRepair = "rbxassetid://9112854440",
-	escapeSuccess = "rbxassetid://9112854440",
-	decoyShatter = "rbxassetid://9112854440",
-}
+local OBJECTIVE_CONFIG = Constants.OBJECTIVES
+local REMOTE_LIMITS = Constants.REMOTE_LIMITS
+local OBJECTIVE_TAG = OBJECTIVE_CONFIG.OBJECTIVE_TAG
+local REVEAL_TAG = OBJECTIVE_CONFIG.REVEAL_TAG
+local INTERACT_RANGE = OBJECTIVE_CONFIG.INTERACT_RANGE
+local REPAIR_DURATION = OBJECTIVE_CONFIG.REPAIR_DURATION
+local FLASHLIGHT_ITEM_ID = OBJECTIVE_CONFIG.FLASHLIGHT_ITEM_ID
+local FUSE_BOX_DISCONNECTED_NAME = OBJECTIVE_CONFIG.FUSE_BOX_DISCONNECTED_NAME
+local FUSE_BOX_CONNECTED_NAME = OBJECTIVE_CONFIG.FUSE_BOX_CONNECTED_NAME
+local PROTOTYPE_MAP_NAME = OBJECTIVE_CONFIG.PROTOTYPE_MAP_NAME
+local AUTHORED_MAP_NAMES = OBJECTIVE_CONFIG.AUTHORED_MAP_NAMES
+local SOUND_IDS = Constants.SOUNDS
+local ESCAPE_DOOR_POSITION = OBJECTIVE_CONFIG.ESCAPE_DOOR_POSITION
+local ESCAPE_DOOR_SIZE = OBJECTIVE_CONFIG.ESCAPE_DOOR_SIZE
+local ESCAPE_DOOR_OPEN_OFFSET = OBJECTIVE_CONFIG.ESCAPE_DOOR_OPEN_OFFSET
+local DECOY_SHARD_COUNT = OBJECTIVE_CONFIG.DECOY_SHARD_COUNT
+local DECOY_SHATTER_FALLBACK_SECONDS = OBJECTIVE_CONFIG.DECOY_SHATTER_FALLBACK_SECONDS
+local DECOY_THROW_COOLDOWN = REMOTE_LIMITS.DECOY_THROW_COOLDOWN
+local OBJECTIVE_INTERACT_COOLDOWN = REMOTE_LIMITS.OBJECTIVE_INTERACT_COOLDOWN
+local OBJECTIVE_REPAIR_COOLDOWN = REMOTE_LIMITS.OBJECTIVE_REPAIR_COOLDOWN
 
-local ESCAPE_DOOR_POSITION = Vector3.new(158.5, 6, 39)
-local ESCAPE_DOOR_SIZE = Vector3.new(7, 10, 1)
-local ESCAPE_DOOR_OPEN_OFFSET = Vector3.new(0, 12, 0)
-local DECOY_SHARD_COUNT = 10
-local DECOY_SHATTER_FALLBACK_SECONDS = 2.25
-
-local objectiveOrder = {
-	Keycard = 1,
-	Fuse = 2,
-	RepairPanel = 3,
-	EscapeDoor = 4,
-	DecoyBottle = 0,
-}
-
-local interactPartNames = {
-	Keycard = "KeycardInteract",
-	Fuse = "FuseInteract",
-	RepairPanel = "RepairPanelInteract",
-	EscapeDoor = "EscapeDoorInteract",
-	DecoyBottle = "DecoyBottleInteract",
-}
+local objectiveOrder = OBJECTIVE_CONFIG.ORDER
+local interactPartNames = OBJECTIVE_CONFIG.INTERACT_PART_NAMES
 
 local playerState = {}
 local inventories = {}
 local repairSessions = {}
 local itemArtTemplates = {}
 local warnedValidationMessages = {}
+local lastDecoyThrowAt = {}
+local lastObjectiveInteractAt = {}
+local lastRepairActionAt = {}
 local objectiveState = {
 	keycardAcquired = false,
 	fuseHolder = nil,
@@ -115,14 +105,68 @@ local function getInventoryUsed(player): number
 	return used
 end
 
+local function makeSlotLabel(slotStart: number?, slotEnd: number?): string
+	if not slotStart then
+		return ""
+	end
+	if slotEnd and slotEnd ~= slotStart then
+		return tostring(slotStart) .. "-" .. tostring(slotEnd)
+	end
+	return tostring(slotStart)
+end
+
+local function findInventorySlot(weight: number, occupied): number?
+	for startSlot = 2, InventoryDefinitions.CAPACITY do
+		local endSlot = startSlot + weight - 1
+		if endSlot > InventoryDefinitions.CAPACITY then
+			return nil
+		end
+
+		local available = true
+		for slot = startSlot, endSlot do
+			if occupied[slot] then
+				available = false
+				break
+			end
+		end
+
+		if available then
+			return startSlot
+		end
+	end
+
+	return nil
+end
+
 local function getInventoryPayload(player)
 	local payloadItems = {}
+	local occupied = {}
 	for _, itemId in ipairs(getInventory(player).items) do
 		local item = InventoryDefinitions.getItem(itemId)
+		local weight = InventoryDefinitions.getWeight(itemId)
+		local slotStart = nil
+		local slotEnd = nil
+		if item.id == FLASHLIGHT_ITEM_ID then
+			slotStart = 1
+			slotEnd = 1
+		else
+			slotStart = findInventorySlot(weight, occupied)
+			slotEnd = if slotStart then slotStart + weight - 1 else nil
+		end
+
+		if slotStart and slotEnd then
+			for slot = slotStart, slotEnd do
+				occupied[slot] = true
+			end
+		end
+
 		table.insert(payloadItems, {
 			id = item.id,
 			name = item.name,
-			weight = InventoryDefinitions.getWeight(itemId),
+			weight = weight,
+			slotStart = slotStart,
+			slotEnd = slotEnd,
+			slotLabel = makeSlotLabel(slotStart, slotEnd),
 		})
 	end
 
@@ -185,6 +229,10 @@ local function warnOnce(key: string, message: string)
 
 	warnedValidationMessages[key] = true
 	warn("[ObjectiveSystem] " .. message)
+end
+
+local function isKnownObjectiveName(objectiveName: string): boolean
+	return interactPartNames[objectiveName] ~= nil
 end
 
 local function playWorldSound(parent: Instance, name: string, soundId: string, volume: number, maxDistance: number)
@@ -892,7 +940,7 @@ local function ensureObjectiveProps()
 			sound.Volume = 0.35
 			sound.RollOffMaxDistance = 65
 			sound.RollOffMinDistance = 8
-			sound.SoundId = "rbxassetid://9112854440"
+			sound.SoundId = SOUND_IDS.ambientLandmark
 			sound.Parent = landmark
 		end
 		sound:Play()
@@ -977,9 +1025,16 @@ local function showCollectibleInstance(instance: Instance)
 	instance:SetAttribute("Collected", false)
 
 	if instance:IsA("BasePart") then
-		instance.Transparency = 0
-		instance.CanTouch = true
-		instance.CanQuery = true
+		if instance.Name:find("Interact") then
+			instance.Transparency = 1
+			instance.CanCollide = false
+			instance.CanTouch = true
+			instance.CanQuery = true
+		else
+			instance.Transparency = 0
+			instance.CanTouch = true
+			instance.CanQuery = true
+		end
 		instance:SetAttribute("Collected", false)
 	elseif instance:IsA("Decal") or instance:IsA("Texture") then
 		instance.Transparency = 0
@@ -991,9 +1046,16 @@ local function showCollectibleInstance(instance: Instance)
 		descendant:SetAttribute("Collected", false)
 
 		if descendant:IsA("BasePart") then
-			descendant.Transparency = 0
-			descendant.CanTouch = true
-			descendant.CanQuery = true
+			if descendant.Name:find("Interact") then
+				descendant.Transparency = 1
+				descendant.CanCollide = false
+				descendant.CanTouch = true
+				descendant.CanQuery = true
+			else
+				descendant.Transparency = 0
+				descendant.CanTouch = true
+				descendant.CanQuery = true
+			end
 			descendant:SetAttribute("Collected", false)
 		elseif descendant:IsA("Decal") or descendant:IsA("Texture") then
 			descendant.Transparency = 0
@@ -1276,7 +1338,7 @@ local function interact(player, objectiveName)
 
 		playWorldSound(part, "ObjectivePickup", SOUND_IDS.pickup, 0.4, 45)
 		setCollected(part, objectiveName)
-		sendStatus(player, "Decoy bottle acquired. Press G to throw it.", "sub")
+		sendStatus(player, "Decoy bottle acquired. Equip it, then press G to throw.", "sub")
 	end
 end
 
@@ -1328,6 +1390,7 @@ local function throwDecoy(player, origin, direction)
 	bottle:PivotTo(CFrame.new(spawnPosition) * CFrame.Angles(math.rad(-12), math.rad(18), math.rad(20)))
 	body.AssemblyLinearVelocity = (safeDirection * 85) + Vector3.new(0, 18, 0)
 	body.AssemblyAngularVelocity = Vector3.new(4, 9, 2)
+	playWorldSound(body, "DecoyThrow", SOUND_IDS.decoyThrow, 0.25, 35)
 
 	local hasShattered = false
 	local thrownAt = os.clock()
@@ -1415,6 +1478,7 @@ local function throwDecoy(player, origin, direction)
 	sendStatus(player, "Decoy thrown.", "sub")
 end
 
+-- Initializes objective remotes, authored world props, inventories, and cleanup hooks.
 function ObjectiveSystem.init()
 	ensureObjectiveProps()
 
@@ -1438,22 +1502,45 @@ function ObjectiveSystem.init()
 		end
 		playerState[player] = nil
 		inventories[player] = nil
+		lastDecoyThrowAt[player] = nil
+		lastObjectiveInteractAt[player] = nil
+		lastRepairActionAt[player] = nil
 	end)
 
 	objectiveEvent.OnServerEvent:Connect(function(player, objectiveName, action)
 		if typeof(objectiveName) ~= "string" then return end
+		if not isKnownObjectiveName(objectiveName) then return end
+
+		local now = os.clock()
 		if objectiveName == "RepairPanel" and action == "BeginRepair" then
+			if now - (lastRepairActionAt[player] or 0) < OBJECTIVE_REPAIR_COOLDOWN then
+				return
+			end
+			lastRepairActionAt[player] = now
 			beginRepair(player)
 			return
 		elseif objectiveName == "RepairPanel" and action == "CancelRepair" then
+			if now - (lastRepairActionAt[player] or 0) < OBJECTIVE_REPAIR_COOLDOWN then
+				return
+			end
+			lastRepairActionAt[player] = now
 			cancelRepair(player)
 			return
 		end
 
+		if now - (lastObjectiveInteractAt[player] or 0) < OBJECTIVE_INTERACT_COOLDOWN then
+			return
+		end
+		lastObjectiveInteractAt[player] = now
 		interact(player, objectiveName)
 	end)
 
 	decoyThrowEvent.OnServerEvent:Connect(function(player, origin, direction)
+		local now = os.clock()
+		if now - (lastDecoyThrowAt[player] or 0) < DECOY_THROW_COOLDOWN then
+			return
+		end
+		lastDecoyThrowAt[player] = now
 		throwDecoy(player, origin, direction)
 	end)
 end

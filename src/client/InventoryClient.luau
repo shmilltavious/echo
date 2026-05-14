@@ -4,17 +4,22 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local InventoryDefinitions = require(ReplicatedStorage.Shared.InventoryDefinitions)
+local EquipmentClient = require(script.Parent.EquipmentClient)
 
 local player = Players.LocalPlayer
 local initialized = false
-local inventoryEvent = ReplicatedStorage:WaitForChild("InventoryUpdate", 10)
 local slotsFrame: Frame? = nil
 local screenGui: ScreenGui? = nil
 local itemArtTemplates = {}
 
 local SLOT_SIZE = 54
+local SLOT_WIDTH = 78
 local SLOT_GAP = 6
 local OCCUPIED_BORDER_COLOR = Color3.fromRGB(238, 238, 228)
+local EQUIPPED_BORDER_COLOR = Color3.fromRGB(255, 246, 196)
+local ICON_MODEL_ROTATIONS = {
+	Fuse = CFrame.Angles(0, math.rad(90), 0),
+}
 
 local function clearChildren(instance: Instance)
 	for _, child in ipairs(instance:GetChildren()) do
@@ -125,6 +130,13 @@ local function addAuthoredIconModel(itemId: string, viewport: ViewportFrame): bo
 	local boundsCFrame, boundsSize = model:GetBoundingBox()
 	model:PivotTo(model:GetPivot() - boundsCFrame.Position)
 	boundsCFrame, boundsSize = model:GetBoundingBox()
+	local iconRotation = ICON_MODEL_ROTATIONS[itemId]
+	if iconRotation then
+		model:PivotTo(iconRotation)
+		boundsCFrame, boundsSize = model:GetBoundingBox()
+		model:PivotTo(model:GetPivot() - boundsCFrame.Position)
+		boundsCFrame, boundsSize = model:GetBoundingBox()
+	end
 
 	local maxAxis = math.max(boundsSize.X, math.max(boundsSize.Y, boundsSize.Z))
 	if maxAxis <= 0 then
@@ -226,27 +238,57 @@ local function createSilhouette(itemId: string, color: Color3, parent: Instance)
 	createProceduralIcon(itemId, color, parent)
 end
 
-local function createItemCell(item, heightSlots: number)
+local function createSlotLabel(text: string, parent: Instance, subdued: boolean)
+	local slotLabel = Instance.new("TextLabel")
+	slotLabel.Name = "SlotNumber"
+	slotLabel.BackgroundTransparency = 1
+	slotLabel.Size = UDim2.new(0, 24, 0, 24)
+	slotLabel.Position = UDim2.new(0, 4, 0, 6)
+	slotLabel.Font = Enum.Font.GothamBold
+	slotLabel.Text = text
+	slotLabel.TextColor3 = if subdued then Color3.fromRGB(118, 116, 108) else Color3.fromRGB(238, 235, 218)
+	slotLabel.TextSize = 13
+	slotLabel.TextXAlignment = Enum.TextXAlignment.Center
+	slotLabel.TextYAlignment = Enum.TextYAlignment.Center
+	slotLabel.Parent = parent
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(0, 0, 0)
+	stroke.Transparency = 0.65
+	stroke.Thickness = 1
+	stroke.Parent = slotLabel
+end
+
+local function createItemCell(item, heightSlots: number, isEquipped: boolean)
 	local cell = Instance.new("Frame")
 	cell.Name = item.id .. "Cell"
-	cell.Size = UDim2.new(0, SLOT_SIZE, 0, (SLOT_SIZE * heightSlots) + (SLOT_GAP * (heightSlots - 1)))
+	cell.Size = UDim2.new(0, SLOT_WIDTH, 0, (SLOT_SIZE * heightSlots) + (SLOT_GAP * (heightSlots - 1)))
 	cell.BackgroundColor3 = Color3.fromRGB(7, 8, 9)
-	cell.BackgroundTransparency = 0.12
+	cell.BackgroundTransparency = if isEquipped then 0.04 else 0.12
 	cell.BorderSizePixel = 0
-	addStroke(cell, OCCUPIED_BORDER_COLOR, 0.18, 1)
+	addStroke(cell, if isEquipped then EQUIPPED_BORDER_COLOR else OCCUPIED_BORDER_COLOR, if isEquipped then 0.02 else 0.18, if isEquipped then 2 else 1)
 
 	local corner = Instance.new("UICorner")
 	corner.CornerRadius = UDim.new(0, 5)
 	corner.Parent = cell
 
-	createSilhouette(item.id, item.color or Color3.fromRGB(170, 170, 160), cell)
+	createSlotLabel(tostring(item.slotLabel or ""), cell, false)
+
+	local iconHolder = Instance.new("Frame")
+	iconHolder.Name = "IconHolder"
+	iconHolder.BackgroundTransparency = 1
+	iconHolder.Size = UDim2.new(0, SLOT_SIZE, 1, 0)
+	iconHolder.Position = UDim2.new(0, 24, 0, 0)
+	iconHolder.Parent = cell
+
+	createSilhouette(item.id, item.color or Color3.fromRGB(170, 170, 160), iconHolder)
 
 	local label = Instance.new("TextLabel")
 	label.Name = "Name"
 	label.BackgroundTransparency = 1
 	label.AnchorPoint = Vector2.new(0.5, 1)
-	label.Size = UDim2.new(1, -8, 0, 20)
-	label.Position = UDim2.new(0.5, 0, 1, -6)
+	label.Size = UDim2.new(1, -32, 0, 20)
+	label.Position = UDim2.new(0.5, 12, 1, -6)
 	label.Font = Enum.Font.GothamMedium
 	label.Text = item.name
 	label.TextColor3 = Color3.fromRGB(204, 201, 190)
@@ -268,7 +310,7 @@ end
 local function createEmptyCell(index: number)
 	local cell = Instance.new("Frame")
 	cell.Name = "EmptySlot" .. tostring(index)
-	cell.Size = UDim2.fromOffset(SLOT_SIZE, SLOT_SIZE)
+	cell.Size = UDim2.fromOffset(SLOT_WIDTH, SLOT_SIZE)
 	cell.BackgroundColor3 = Color3.fromRGB(5, 6, 7)
 	cell.BackgroundTransparency = 0.58
 	cell.BorderSizePixel = 0
@@ -278,10 +320,12 @@ local function createEmptyCell(index: number)
 	corner.CornerRadius = UDim.new(0, 5)
 	corner.Parent = cell
 
+	createSlotLabel(tostring(index), cell, true)
+
 	local line = Instance.new("Frame")
 	line.Name = "EmptyLine"
 	line.AnchorPoint = Vector2.new(0.5, 0.5)
-	line.Position = UDim2.fromScale(0.5, 0.5)
+	line.Position = UDim2.new(0, 51, 0.5, 0)
 	line.Size = UDim2.new(0, 20, 0, 1)
 	line.BackgroundColor3 = Color3.fromRGB(75, 75, 70)
 	line.BackgroundTransparency = 0.62
@@ -305,7 +349,7 @@ local function createGui()
 	frame.Name = "Slots"
 	frame.AnchorPoint = Vector2.new(0, 1)
 	frame.Position = UDim2.new(0, 28, 1, -28)
-	frame.Size = UDim2.new(0, SLOT_SIZE, 0, (SLOT_SIZE * InventoryDefinitions.CAPACITY) + (SLOT_GAP * (InventoryDefinitions.CAPACITY - 1)))
+	frame.Size = UDim2.new(0, SLOT_WIDTH, 0, (SLOT_SIZE * InventoryDefinitions.CAPACITY) + (SLOT_GAP * (InventoryDefinitions.CAPACITY - 1)))
 	frame.BackgroundTransparency = 1
 	frame.Parent = gui
 
@@ -321,26 +365,19 @@ local function createGui()
 	slotsFrame = frame
 end
 
-local function render(payload)
+local function render(state)
 	if not slotsFrame then return end
 	clearChildren(slotsFrame)
 
-	local capacity = math.max(1, tonumber(payload.capacity) or InventoryDefinitions.CAPACITY)
+	local capacity = math.max(1, tonumber(state.capacity) or InventoryDefinitions.CAPACITY)
 	local used = 0
 	local layoutOrder = 0
 
-	if typeof(payload.items) == "table" then
-		for _, payloadItem in ipairs(payload.items) do
-			local itemId = tostring(payloadItem.id or "")
-			local definition = InventoryDefinitions.getItem(itemId)
-			local weight = math.clamp(tonumber(payloadItem.weight) or definition.weight or 1, 1, capacity)
-			local item = {
-				id = itemId,
-				name = tostring(payloadItem.name or definition.name or itemId),
-				weight = weight,
-				color = definition.color,
-			}
-			local cell = createItemCell(item, weight)
+	if typeof(state.items) == "table" then
+		for _, item in ipairs(state.items) do
+			local weight = math.clamp(tonumber(item.weight) or 1, 1, capacity)
+			local isEquipped = tostring(item.id or "") == state.equippedItemId
+			local cell = createItemCell(item, weight, isEquipped)
 			cell.LayoutOrder = layoutOrder
 			cell.Parent = slotsFrame
 			used += weight
@@ -360,23 +397,10 @@ function InventoryClient.init()
 	if initialized then return end
 	initialized = true
 
+	EquipmentClient.init()
 	cacheItemArtTemplates()
 	createGui()
-	render({
-		capacity = InventoryDefinitions.CAPACITY,
-		used = InventoryDefinitions.getWeight("Flashlight"),
-		items = {
-			{
-				id = "Flashlight",
-				name = InventoryDefinitions.getItem("Flashlight").name,
-				weight = InventoryDefinitions.getWeight("Flashlight"),
-			},
-		},
-	})
-
-	if inventoryEvent then
-		inventoryEvent.OnClientEvent:Connect(render)
-	end
+	EquipmentClient.onChanged(render)
 end
 
 return InventoryClient

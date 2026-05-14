@@ -29,6 +29,7 @@ InventoryDefinitions.ITEMS = {
 	},
 }
 
+-- Returns an item definition, falling back to a generic one for unknown IDs.
 function InventoryDefinitions.getItem(itemId: string)
 	return InventoryDefinitions.ITEMS[itemId] or {
 		id = itemId,
@@ -38,6 +39,7 @@ function InventoryDefinitions.getItem(itemId: string)
 	}
 end
 
+-- Returns a safe positive inventory weight for an item ID.
 function InventoryDefinitions.getWeight(itemId: string): number
 	local item = InventoryDefinitions.getItem(itemId)
 	return math.max(1, tonumber(item.weight) or 1)

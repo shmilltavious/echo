@@ -6,8 +6,14 @@ local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local SoundService = game:GetService("SoundService")
 local Debris = game:GetService("Debris")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Constants = require(ReplicatedStorage.Shared.Constants)
+local EquipmentClient = require(script.Parent.EquipmentClient)
 
 -- Constants
+local CLIENT_WAIT_TIMEOUT = Constants.REMOTE_LIMITS.CLIENT_WAIT_TIMEOUT
+local GAMEPLAY_ITEMS_FOLDER_NAME = Constants.OBJECTIVES.GAMEPLAY_ITEMS_FOLDER_NAME
 local MAX_BATTERY = 60 -- 60 seconds of total flashlight usage
 local FULL_BRIGHTNESS = 5.25
 local FULL_RANGE = 40
@@ -27,6 +33,10 @@ local SLEEVE_COLOR = Color3.fromRGB(34, 35, 38)
 local EQUIP_ANIMATION_TIME = 0.38
 local UNEQUIP_ANIMATION_TIME = 0.3
 local TOGGLE_COOLDOWN = 0.32
+local FLASHLIGHT_REPORT_RATE = 0.08
+local REMOTE_STALE_TIME = 0.35
+local REMOTE_BEAM_LENGTH = 26
+local REMOTE_BEAM_THICKNESS = 0.2
 local FLASHLIGHT_CLICK_SOUND_ID = "rbxasset://sounds/switch.wav"
 
 -- State
@@ -42,6 +52,7 @@ local surfaceFillLight: PointLight? = nil
 local batteryConnection: RBXScriptConnection? = nil
 local isDead = false
 local isOn = true
+local isEquipped = true
 local hudFrame: Frame? = nil
 local hudStatus: TextLabel? = nil
 local hudBatteryText: TextLabel? = nil
@@ -53,6 +64,9 @@ local viewmodelTargetAlpha = 1
 local viewmodelAnimationTime = 0
 local viewmodelAnimationDuration = 0
 local viewModelSuppressed = false
+local flashlightStateEvent: RemoteEvent? = nil
+local reportTimer = 0
+local remoteFlashlights = {}
 
 local function addTextStroke(label: TextLabel, transparency: number)
 	label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
@@ -82,6 +96,17 @@ local function setLightsEnabled(enabled: boolean)
 	end
 	if surfaceFillLight then
 		surfaceFillLight.Enabled = enabled
+	end
+end
+
+local function shouldEmitLight(): boolean
+	return isEquipped and isOn and not isDead
+end
+
+local function applyEquippedVisibility()
+	setLightsEnabled(shouldEmitLight())
+	if hudFrame then
+		hudFrame.Visible = isEquipped
 	end
 end
 
@@ -145,10 +170,24 @@ local function prepareViewModel(model: Model)
 	end
 end
 
+local function findFlashlightTemplate(): Model?
+	local gameplayItems = workspace:FindFirstChild(GAMEPLAY_ITEMS_FOLDER_NAME)
+	local template = gameplayItems and gameplayItems:FindFirstChild(VIEWMODEL_TEMPLATE_NAME)
+	if not template then
+		template = workspace:FindFirstChild(VIEWMODEL_TEMPLATE_NAME, true)
+	end
+
+	if template and template:IsA("Model") then
+		return template
+	end
+
+	return nil
+end
+
 local function createFlashlightViewModel(camera: Camera?): Model?
-	local template = workspace:FindFirstChild(VIEWMODEL_TEMPLATE_NAME)
-	if not (template and template:IsA("Model")) then
-		warn("Workspace.Flashlight model not found. Falling back to light-only flashlight.")
+	local template = findFlashlightTemplate()
+	if not template then
+		warn("Flashlight model not found in Workspace.GameplayItems or workspace descendants. Falling back to light-only flashlight.")
 		return nil
 	end
 
@@ -260,7 +299,7 @@ local function createSurfaceFillLight(): (Part, PointLight)
 	light.Range = SURFACE_FILL_RANGE
 	light.Shadows = false
 	light.Color = Color3.fromRGB(255, 240, 210)
-	light.Enabled = isOn
+	light.Enabled = shouldEmitLight()
 	light.Parent = part
 
 	return part, light
@@ -292,6 +331,7 @@ function Flashlight.createFlashlight(): (Part, SpotLight)
 	spotLight.Shadows = true
 	spotLight.Color = Color3.fromRGB(255, 245, 220) -- Warm white
 	spotLight.Face = Enum.NormalId.Front
+	spotLight.Enabled = shouldEmitLight()
 	spotLight.Parent = part
 
 	local fillLight = Instance.new("PointLight")
@@ -300,6 +340,7 @@ function Flashlight.createFlashlight(): (Part, SpotLight)
 	fillLight.Range = CLOSE_FILL_RANGE
 	fillLight.Shadows = false
 	fillLight.Color = Color3.fromRGB(255, 240, 210)
+	fillLight.Enabled = shouldEmitLight()
 	fillLight.Parent = part
 	flashlightFill = fillLight
 	surfaceFillPart, surfaceFillLight = createSurfaceFillLight()
@@ -318,7 +359,7 @@ local function updateFlashlightTransform(camera: Camera, dt: number)
 	end
 
 	if surfaceFillPart and surfaceFillLight then
-		if isOn and not isDead then
+		if shouldEmitLight() then
 			local params = RaycastParams.new()
 			params.FilterType = Enum.RaycastFilterType.Exclude
 			local ignored = { flashlightPart, surfaceFillPart, flashlightViewModel, handViewModel }
@@ -344,7 +385,7 @@ local function updateFlashlightTransform(camera: Camera, dt: number)
 		end
 	end
 
-	local shouldShowViewModel = not viewModelSuppressed and (viewmodelAlpha > 0.01 or viewmodelTargetAlpha > 0)
+	local shouldShowViewModel = not viewModelSuppressed and (isEquipped or viewmodelAlpha > 0.01 or viewmodelTargetAlpha > 0)
 	setViewModelParent(if shouldShowViewModel then camera else nil)
 	local animatedOffset = getAnimatedViewModelOffset()
 
@@ -361,10 +402,16 @@ end
 -- Create HUD in bottom-right corner
 function Flashlight.createHUD()
 	local player = Players.LocalPlayer
+	local playerGui = player:FindFirstChild("PlayerGui") or player:WaitForChild("PlayerGui", CLIENT_WAIT_TIMEOUT)
+	if not playerGui then
+		warn("[Flashlight] PlayerGui was not available; flashlight HUD disabled.")
+		return
+	end
+
 	local screenGui = Instance.new("ScreenGui")
 	screenGui.Name = "FlashlightHUD"
 	screenGui.ResetOnSpawn = false
-	screenGui.Parent = player:WaitForChild("PlayerGui")
+	screenGui.Parent = playerGui
 
 	local frame = Instance.new("Frame")
 	frame.Name = "HudFrame"
@@ -373,6 +420,7 @@ function Flashlight.createHUD()
 	frame.Position = UDim2.new(1, -24, 1, -30)
 	frame.BackgroundTransparency = 1
 	frame.BorderSizePixel = 0
+	frame.Visible = isEquipped
 	frame.Parent = screenGui
 
 	local diamond = Instance.new("Frame")
@@ -499,22 +547,22 @@ end
 
 -- Toggle flashlight on/off
 function Flashlight.toggle()
-	if isDead or viewModelSuppressed then return end
+	if isDead or not isEquipped or viewModelSuppressed then return end
 	local now = os.clock()
-	if now - lastToggleTime < TOGGLE_COOLDOWN or viewmodelAlpha ~= viewmodelTargetAlpha then
+	if now - lastToggleTime < TOGGLE_COOLDOWN then
 		return
 	end
 	lastToggleTime = now
 
 	isOn = not isOn
 	playClickSound(isOn)
-	setLightsEnabled(isOn)
-	startViewModelTransition(isOn)
+	applyEquippedVisibility()
 
 	print("🔦 Flashlight", if isOn then "ON" else "OFF")
 	Flashlight.updateHUD()
 end
 
+-- Suppresses or restores the first-person flashlight model without changing equipment state.
 function Flashlight.setViewModelSuppressed(suppressed: boolean)
 	viewModelSuppressed = suppressed == true
 	if viewModelSuppressed then
@@ -522,10 +570,161 @@ function Flashlight.setViewModelSuppressed(suppressed: boolean)
 	end
 end
 
--- Initialize the flashlight system
+-- Applies whether the flashlight item is currently equipped.
+function Flashlight.setEquipped(equipped: boolean)
+	local nextEquipped = equipped == true
+	if isEquipped == nextEquipped then
+		applyEquippedVisibility()
+		return
+	end
+
+	isEquipped = nextEquipped
+	startViewModelTransition(isEquipped)
+	applyEquippedVisibility()
+end
+
+local function createRemoteFlashlight()
+	local model = Instance.new("Model")
+	model.Name = "RemoteFlashlight"
+	model.Parent = workspace
+
+	local emitter = Instance.new("Part")
+	emitter.Name = "RemoteFlashlightEmitter"
+	emitter.Size = Vector3.new(0.16, 0.16, 0.16)
+	emitter.Transparency = 1
+	emitter.Anchored = true
+	emitter.CanCollide = false
+	emitter.CanTouch = false
+	emitter.CanQuery = false
+	emitter.CastShadow = false
+	emitter.Parent = model
+
+	local light = Instance.new("SpotLight")
+	light.Name = "RemoteFlashlightBeam"
+	light.Angle = SPOT_ANGLE
+	light.Brightness = FULL_BRIGHTNESS * 0.55
+	light.Range = FULL_RANGE
+	light.Shadows = true
+	light.Color = Color3.fromRGB(255, 245, 220)
+	light.Face = Enum.NormalId.Front
+	light.Parent = emitter
+
+	local beam = Instance.new("Part")
+	beam.Name = "RemoteFlashlightRay"
+	beam.Size = Vector3.new(REMOTE_BEAM_THICKNESS, REMOTE_BEAM_THICKNESS, REMOTE_BEAM_LENGTH)
+	beam.Transparency = 0.78
+	beam.Anchored = true
+	beam.CanCollide = false
+	beam.CanTouch = false
+	beam.CanQuery = false
+	beam.CastShadow = false
+	beam.Material = Enum.Material.Neon
+	beam.Color = Color3.fromRGB(255, 244, 206)
+	beam.Parent = model
+
+	return {
+		model = model,
+		emitter = emitter,
+		light = light,
+		beam = beam,
+		lastSeen = os.clock(),
+	}
+end
+
+local function destroyRemoteFlashlight(sourceUserId: string)
+	local remote = remoteFlashlights[sourceUserId]
+	if remote then
+		if remote.model then
+			remote.model:Destroy()
+		end
+		remoteFlashlights[sourceUserId] = nil
+	end
+end
+
+local function handleRemoteFlashlight(payload)
+	if typeof(payload) ~= "table" then return end
+	if tonumber(payload.sourceUserId) == Players.LocalPlayer.UserId then return end
+
+	local sourceUserId = tostring(payload.sourceUserId or "")
+	if sourceUserId == "" then return end
+
+	if payload.enabled ~= true then
+		destroyRemoteFlashlight(sourceUserId)
+		return
+	end
+
+	local origin = payload.origin
+	local direction = payload.direction
+	if typeof(origin) ~= "Vector3" or typeof(direction) ~= "Vector3" or direction.Magnitude <= 0 then
+		destroyRemoteFlashlight(sourceUserId)
+		return
+	end
+
+	local remote = remoteFlashlights[sourceUserId]
+	if not remote then
+		remote = createRemoteFlashlight()
+		remoteFlashlights[sourceUserId] = remote
+	end
+
+	local unitDirection = direction.Unit
+	local range = math.clamp(tonumber(payload.range) or FULL_RANGE, 8, FULL_RANGE)
+	local brightnessScale = math.clamp(tonumber(payload.brightnessScale) or 1, 0.1, 1)
+	local beamLength = math.min(REMOTE_BEAM_LENGTH, range)
+	local beamCenter = origin + (unitDirection * (beamLength * 0.5))
+
+	remote.lastSeen = os.clock()
+	remote.emitter.CFrame = CFrame.lookAt(origin, origin + unitDirection)
+	remote.light.Brightness = FULL_BRIGHTNESS * 0.55 * brightnessScale
+	remote.light.Range = range
+	remote.light.Enabled = true
+	remote.beam.Size = Vector3.new(REMOTE_BEAM_THICKNESS, REMOTE_BEAM_THICKNESS, beamLength)
+	remote.beam.CFrame = CFrame.lookAt(beamCenter, beamCenter + unitDirection)
+	remote.beam.Transparency = 0.82 - (0.18 * brightnessScale)
+end
+
+local function updateRemoteFlashlights()
+	local now = os.clock()
+	for sourceUserId, remote in pairs(remoteFlashlights) do
+		if now - (remote.lastSeen or 0) > REMOTE_STALE_TIME then
+			destroyRemoteFlashlight(sourceUserId)
+		end
+	end
+end
+
+local function reportFlashlightState(dt: number)
+	if not flashlightStateEvent then return end
+
+	reportTimer += dt
+	if reportTimer < FLASHLIGHT_REPORT_RATE then
+		return
+	end
+	reportTimer = 0
+
+	local enabled = shouldEmitLight()
+	local camera = workspace.CurrentCamera
+	local origin = flashlightPart and flashlightPart.Position
+	local direction = camera and camera.CFrame.LookVector
+	local brightnessScale = math.clamp(battery / MAX_BATTERY, 0, 1)
+
+	if enabled and battery < DIMMING_THRESHOLD then
+		brightnessScale = math.clamp(battery / DIMMING_THRESHOLD, 0.1, 1)
+	end
+
+	flashlightStateEvent:FireServer({
+		enabled = enabled,
+		origin = origin,
+		direction = direction,
+		range = flashlightSpot and flashlightSpot.Range or FULL_RANGE,
+		brightnessScale = brightnessScale,
+	})
+end
+
+-- Initializes flashlight input, viewmodel, lights, HUD, and remote replication.
 function Flashlight.init()
 	print("🔦 Flashlight initializing...")
 
+	EquipmentClient.init()
+	flashlightStateEvent = ReplicatedStorage:WaitForChild("FlashlightState", CLIENT_WAIT_TIMEOUT)
 	flashlightPart, flashlightSpot = Flashlight.createFlashlight()
 
 	local player = Players.LocalPlayer
@@ -537,6 +736,15 @@ function Flashlight.init()
 	-- Create HUD
 	Flashlight.createHUD()
 	Flashlight.updateHUD()
+	applyEquippedVisibility()
+
+	EquipmentClient.onChanged(function(state)
+		Flashlight.setEquipped(state.equippedItemId == "Flashlight")
+	end)
+
+	if flashlightStateEvent then
+		flashlightStateEvent.OnClientEvent:Connect(handleRemoteFlashlight)
+	end
 
 	-- Listen for F key to toggle flashlight
 	UserInputService.InputBegan:Connect(function(input, gameProcessed)
@@ -555,6 +763,8 @@ function Flashlight.init()
 		end
 
 		Flashlight.updateBattery(dt)
+		reportFlashlightState(dt)
+		updateRemoteFlashlights()
 
 		-- Update HUD text every 0.5s to avoid spam
 		hudTimer = hudTimer + dt
@@ -568,11 +778,11 @@ function Flashlight.init()
 	Flashlight.updateHUD()
 end
 
--- Deplete battery each frame based on delta time (only when ON)
+-- Depletes battery each frame while the flashlight is on and equipped.
 function Flashlight.updateBattery(dt: number)
 	if not flashlightSpot or isDead then return end
 
-	if isOn then
+	if isEquipped and isOn then
 		battery = math.max(0, battery - dt)
 
 		-- Dim the flashlight during the last 12 seconds as a warning
@@ -592,17 +802,16 @@ function Flashlight.updateBattery(dt: number)
 				flashlightFill.Range = CLOSE_FILL_RANGE
 			end
 		elseif battery <= 0 then
-			setLightsEnabled(false)
 			isDead = true
 			isOn = false
-			startViewModelTransition(false)
+			applyEquippedVisibility()
 			Flashlight.updateHUD()
 			print("🔋 Flashlight battery depleted!")
 		end
 	end
 end
 
--- Clean up flashlight objects
+-- Cleans up flashlight viewmodel, lights, HUD, and frame connections.
 function Flashlight.destroy()
 	if batteryConnection then
 		batteryConnection:Disconnect()
@@ -638,21 +847,29 @@ function Flashlight.destroy()
 	end
 end
 
--- Getters
+-- Returns the current remaining battery seconds.
 function Flashlight.getBattery(): number
 	return battery
 end
 
+-- Returns the maximum battery seconds.
 function Flashlight.getMaxBattery(): number
 	return MAX_BATTERY
 end
 
+-- Returns whether the battery is depleted.
 function Flashlight.getIsDead(): boolean
 	return isDead
 end
 
+-- Returns whether the flashlight beam should currently be visible.
 function Flashlight.getIsOn(): boolean
-	return isOn
+	return isEquipped and isOn
+end
+
+-- Returns whether the flashlight item is currently equipped.
+function Flashlight.getIsEquipped(): boolean
+	return isEquipped
 end
 
 return Flashlight

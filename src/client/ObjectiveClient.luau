@@ -7,13 +7,16 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 
+local Constants = require(ReplicatedStorage.Shared.Constants)
 local Flashlight = require(script.Parent.Flashlight)
+local EquipmentClient = require(script.Parent.EquipmentClient)
 
 local player = Players.LocalPlayer
-local objectiveEvent = ReplicatedStorage:WaitForChild("ObjectiveInteract", 10)
-local objectiveStatusEvent = ReplicatedStorage:WaitForChild("ObjectiveStatus", 10)
-local decoyThrowEvent = ReplicatedStorage:WaitForChild("DecoyThrow", 10)
-local inventoryEvent = ReplicatedStorage:WaitForChild("InventoryUpdate", 10)
+local CLIENT_WAIT_TIMEOUT = Constants.REMOTE_LIMITS.CLIENT_WAIT_TIMEOUT
+local objectiveEvent = ReplicatedStorage:WaitForChild("ObjectiveInteract", CLIENT_WAIT_TIMEOUT)
+local objectiveStatusEvent = ReplicatedStorage:WaitForChild("ObjectiveStatus", CLIENT_WAIT_TIMEOUT)
+local decoyThrowEvent = ReplicatedStorage:WaitForChild("DecoyThrow", CLIENT_WAIT_TIMEOUT)
+local inventoryEvent = ReplicatedStorage:WaitForChild("InventoryUpdate", CLIENT_WAIT_TIMEOUT)
 
 local initialized = false
 local nearestObjective: BasePart? = nil
@@ -280,7 +283,12 @@ local function createRepairProgress(screenGui: ScreenGui)
 end
 
 local function createGui()
-	local playerGui = player:WaitForChild("PlayerGui")
+	local playerGui = player:FindFirstChild("PlayerGui") or player:WaitForChild("PlayerGui", CLIENT_WAIT_TIMEOUT)
+	if not playerGui then
+		warn("[ObjectiveClient] PlayerGui was not available; objective HUD disabled.")
+		return
+	end
+
 	local screenGui = Instance.new("ScreenGui")
 	screenGui.Name = "ObjectiveHUD"
 	screenGui.ResetOnSpawn = false
@@ -436,23 +444,20 @@ local function createHeldDecoyBottle()
 	decoyViewModel = model
 end
 
-local function destroyHeldDecoyBottle(restoreFlashlight: boolean?)
+local function destroyHeldDecoyBottle()
 	if decoyViewModel then
 		decoyViewModel:Destroy()
 		decoyViewModel = nil
-	end
-	if restoreFlashlight ~= false then
-		Flashlight.setViewModelSuppressed(false)
 	end
 end
 
 local function updateHeldDecoyBottle()
 	if isEscaped() then
-		destroyHeldDecoyBottle(false)
+		destroyHeldDecoyBottle()
 		Flashlight.destroy()
 		return
 	end
-	if not hasDecoyBottle then
+	if not hasDecoyBottle or not EquipmentClient.isEquipped("DecoyBottle") then
 		destroyHeldDecoyBottle()
 		return
 	end
@@ -463,7 +468,6 @@ local function updateHeldDecoyBottle()
 	if decoyViewModel and decoyViewModel.Parent ~= camera then
 		decoyViewModel.Parent = camera
 	end
-	Flashlight.setViewModelSuppressed(decoyViewModel ~= nil)
 
 	local sway = math.sin(os.clock() * 2.4) * 0.012
 	if decoyViewModel then
@@ -647,6 +651,17 @@ end
 local function throwDecoy()
 	if isEscaped() then return end
 	if not decoyThrowEvent then return end
+	if not hasDecoyBottle then
+		showStatus("No decoy bottle available.", "sub")
+		return
+	end
+	if not EquipmentClient.isEquipped("DecoyBottle") then
+		local decoyItem = EquipmentClient.getItem("DecoyBottle")
+		local slotLabel = decoyItem and decoyItem.slotLabel or "its slot"
+		showStatus("Equip the decoy bottle first with " .. tostring(slotLabel) .. ".", "sub")
+		return
+	end
+
 	local camera = workspace.CurrentCamera
 	local rootPart = getCharacterRoot()
 	if not rootPart then return end
@@ -656,12 +671,14 @@ local function throwDecoy()
 	decoyThrowEvent:FireServer(origin, direction)
 	hasDecoyBottle = false
 	destroyHeldDecoyBottle()
+	EquipmentClient.equipItem("Flashlight")
 end
 
 function ObjectiveClient.init()
 	if initialized then return end
 	initialized = true
 
+	EquipmentClient.init()
 	cacheHeldDecoyTemplate()
 	createGui()
 	showStatus("Find the keycard.", "main")

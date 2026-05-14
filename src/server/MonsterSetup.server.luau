@@ -1,9 +1,19 @@
 -- R15 rig — Motor6D joints already connect every limb, so NO welds needed here.
 -- Adding WeldConstraints on top of Motor6Ds over-constrains the rig and causes
 -- it to fall over or slide sideways.
-local monsterModel = workspace:FindFirstChild("Monster") or workspace:WaitForChild("Rig")
-local rootPart = monsterModel:WaitForChild("HumanoidRootPart")
-local humanoid = monsterModel:WaitForChild("Humanoid")
+local foundMonster = workspace:FindFirstChild("Monster") or workspace:WaitForChild("Rig", 5)
+if not (foundMonster and foundMonster:IsA("Model")) then
+	warn("MonsterSetup disabled: expected Workspace.Monster or Workspace.Rig model.")
+	return
+end
+
+local monsterModel = foundMonster
+local rootPart = monsterModel:WaitForChild("HumanoidRootPart", 5)
+local humanoid = monsterModel:WaitForChild("Humanoid", 5)
+if not (rootPart and rootPart:IsA("BasePart") and humanoid and humanoid:IsA("Humanoid")) then
+	warn("MonsterSetup disabled: monster is missing Humanoid or HumanoidRootPart.")
+	return
+end
 
 -- Server owns physics so NPC movement is smooth and authoritative
 rootPart:SetNetworkOwner(nil)
