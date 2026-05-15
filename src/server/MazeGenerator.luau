@@ -3,6 +3,18 @@ local MazeGenerator = {}
 
 local Constants = require(game.ReplicatedStorage.Shared.Constants)
 
+local function getWallsFolder(): Folder
+	local folder = workspace:FindFirstChild("Walls")
+	if folder and folder:IsA("Folder") then
+		return folder
+	end
+
+	folder = Instance.new("Folder")
+	folder.Name = "Walls"
+	folder.Parent = workspace
+	return folder
+end
+
 -- Create a simple wall
 function MazeGenerator.createWall(position: Vector3, size: Vector3): Part
 	local wall = Instance.new("Part")
@@ -16,16 +28,14 @@ function MazeGenerator.createWall(position: Vector3, size: Vector3): Part
 	wall.BottomSurface = Enum.SurfaceType.Smooth
 	wall.Transparency = 1 -- Start invisible for the mechanic
 	wall.Name = "Wall"
-	wall.Parent = workspace.Walls or Instance.new("Folder", workspace)
+	wall.Parent = getWallsFolder()
 	
 	return wall
 end
 
 -- Create a simple grid-based maze
 function MazeGenerator.generateSimpleMaze(width: number, height: number, cellSize: number)
-	local wallFolder = Instance.new("Folder")
-	wallFolder.Name = "Walls"
-	wallFolder.Parent = workspace
+	getWallsFolder()
 	
 	-- Create outer walls
 	local wallThickness = 1

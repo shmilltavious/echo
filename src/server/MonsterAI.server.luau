@@ -2,60 +2,56 @@ local PathfindingService = game:GetService("PathfindingService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local PATROL_SPEED = 6.5
-local CORNER_SPEED = 7.5
-local STRAIGHT_ACCEL_DELAY = 3.25
-local STRAIGHT_ACCEL_TIME = 1.25
-local SENSE_DECAY_TIME = 5
-local HEAR_THRESHOLD = 0.35
-local WAYPOINT_REACH_DIST = 4
-local WAYPOINT_TIMEOUT = 6
-local ATTACK_RANGE = 5.5
-local TOUCH_ATTACK_RANGE = 2.35
-local STILL_SURVIVE_TIME = 1.35
-local CATCH_COOLDOWN = 4
-local NOISE_REACTIONS = {
-	crouch = {
-		hearThreshold = 0.55,
-		speed = 7.5,
-		maxSpeed = 9.5,
-		decay = 2.5,
-	},
-	walk = {
-		hearThreshold = 0.35,
-		speed = 9.5,
-		maxSpeed = 12,
-		decay = 4,
-	},
-	sprint = {
-		hearThreshold = 0.2,
-		speed = 11.5,
-		maxSpeed = 17,
-		decay = 7,
-	},
-	jump = {
-		hearThreshold = 0.15,
-		speed = 12,
-		maxSpeed = 17.5,
-		decay = 8,
-	},
-	voice = {
-		hearThreshold = 0.2,
-		speed = 12,
-		maxSpeed = 18,
-		decay = 8,
-	},
-	decoy = {
-		hearThreshold = 0.1,
-		speed = 12.5,
-		maxSpeed = 18.5,
-		decay = 9,
-	},
-}
+local Constants = require(ReplicatedStorage.Shared.Constants)
+local MONSTER_CONFIG = Constants.MONSTER_AI
+local REMOTE_LIMITS = Constants.REMOTE_LIMITS
 
-local monsterModel = workspace:FindFirstChild("Monster") or workspace:WaitForChild("Rig")
-local humanoid = monsterModel:WaitForChild("Humanoid")
-local rootPart = monsterModel:WaitForChild("HumanoidRootPart")
+local PATROL_SPEED = MONSTER_CONFIG.PATROL_SPEED
+local CORNER_SPEED = MONSTER_CONFIG.CORNER_SPEED
+local STRAIGHT_ACCEL_DELAY = MONSTER_CONFIG.STRAIGHT_ACCEL_DELAY
+local STRAIGHT_ACCEL_TIME = MONSTER_CONFIG.STRAIGHT_ACCEL_TIME
+local SENSE_DECAY_TIME = MONSTER_CONFIG.SENSE_DECAY_TIME
+local HEAR_THRESHOLD = MONSTER_CONFIG.HEAR_THRESHOLD
+local WAYPOINT_REACH_DIST = MONSTER_CONFIG.WAYPOINT_REACH_DIST
+local WAYPOINT_TIMEOUT = MONSTER_CONFIG.WAYPOINT_TIMEOUT
+local ATTACK_RANGE = MONSTER_CONFIG.ATTACK_RANGE
+local TOUCH_ATTACK_RANGE = MONSTER_CONFIG.TOUCH_ATTACK_RANGE
+local STILL_SURVIVE_TIME = MONSTER_CONFIG.STILL_SURVIVE_TIME
+local CATCH_COOLDOWN = MONSTER_CONFIG.CATCH_COOLDOWN
+local COOP_VISUAL_THRESHOLD = MONSTER_CONFIG.COOP_VISUAL_THRESHOLD
+local NOISE_REPORT_MIN_INTERVAL = REMOTE_LIMITS.NOISE_REPORT_MIN_INTERVAL
+local AUTHORED_MAP_NAMES = Constants.OBJECTIVES.AUTHORED_MAP_NAMES
+local VALID_MOVEMENT_STATES = {
+	idle = true,
+	crouch = true,
+	walk = true,
+	sprint = true,
+	jump = true,
+	decoy = true,
+}
+local NOISE_REACTIONS = MONSTER_CONFIG.NOISE_REACTIONS
+
+local function findMonsterModel(): Model?
+	local found = workspace:FindFirstChild("Monster") or workspace:WaitForChild("Rig", 5)
+	if found and found:IsA("Model") then
+		return found
+	end
+
+	warn("MonsterAI disabled: expected Workspace.Monster or Workspace.Rig model.")
+	return nil
+end
+
+local monsterModel = findMonsterModel()
+if not monsterModel then
+	return
+end
+
+local humanoid = monsterModel:WaitForChild("Humanoid", 5)
+local rootPart = monsterModel:WaitForChild("HumanoidRootPart", 5)
+if not (humanoid and humanoid:IsA("Humanoid") and rootPart and rootPart:IsA("BasePart")) then
+	warn("MonsterAI disabled: monster is missing Humanoid or HumanoidRootPart.")
+	return
+end
 
 rootPart:SetNetworkOwner(nil)
 
@@ -79,6 +75,17 @@ local caughtEvent = ReplicatedStorage:FindFirstChild("MonsterCaughtPlayer") or I
 caughtEvent.Name = "MonsterCaughtPlayer"
 caughtEvent.Parent = ReplicatedStorage
 
+local function getActiveMap(): Instance?
+	for _, mapName in ipairs(AUTHORED_MAP_NAMES) do
+		local map = workspace:FindFirstChild(mapName)
+		if map then
+			return map
+		end
+	end
+
+	return workspace:FindFirstChild("Prototype_Map")
+end
+
 local lastNoisePosition = nil
 local lastNoiseTime = 0
 local lastNoiseDecay = SENSE_DECAY_TIME
@@ -91,11 +98,12 @@ local straightRunTime = 0
 local cornerSlowUntil = 0
 local playerNoiseState = {}
 local caughtCooldowns = {}
+local lastNoiseReportAt = {}
 
 local function normalizeNoiseReport(report)
 	if typeof(report) == "number" then
 		return {
-			intensity = report,
+			intensity = math.clamp(report, 0, 6),
 			movementState = "walk",
 			hasVoice = false,
 			radius = 0,
@@ -111,14 +119,63 @@ local function normalizeNoiseReport(report)
 		}
 	end
 
+	local movementState = tostring(report.movementState or "walk")
+	if not VALID_MOVEMENT_STATES[movementState] then
+		movementState = "walk"
+	end
+
 	return {
-		intensity = tonumber(report.intensity) or 0,
-		visualIntensity = tonumber(report.visualIntensity) or tonumber(report.intensity) or 0,
-		radius = tonumber(report.radius) or 0,
-		movementState = tostring(report.movementState or "walk"),
+		intensity = math.clamp(tonumber(report.intensity) or 0, 0, 6),
+		visualIntensity = math.clamp(tonumber(report.visualIntensity) or tonumber(report.intensity) or 0, 0, 5),
+		radius = math.clamp(tonumber(report.radius) or 0, 0, 64),
+		movementState = movementState,
 		hasVoice = report.hasVoice == true,
-		voiceVolume = tonumber(report.voiceVolume) or 0,
+		voiceVolume = math.clamp(tonumber(report.voiceVolume) or 0, 0, 1),
 	}
+end
+
+local function getServerMovementNoise(playerRoot: BasePart, playerHumanoid: Humanoid)
+	local state = playerHumanoid:GetState()
+	local velocity = playerRoot.AssemblyLinearVelocity
+	local horizontalSpeed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
+
+	if state == Enum.HumanoidStateType.Jumping or state == Enum.HumanoidStateType.Freefall then
+		return {
+			intensity = 1.45,
+			visualIntensity = 0.44,
+			radius = 9,
+			movementState = "jump",
+		}
+	elseif horizontalSpeed >= 16 then
+		return {
+			intensity = 1.25,
+			visualIntensity = 0.33,
+			radius = 8,
+			movementState = "sprint",
+		}
+	elseif horizontalSpeed >= 8 then
+		return {
+			intensity = 0.45,
+			visualIntensity = 0.14,
+			radius = 5,
+			movementState = "walk",
+		}
+	end
+
+	return nil
+end
+
+local function applyServerMovementFloor(noise, playerRoot: BasePart, playerHumanoid: Humanoid)
+	local movementNoise = getServerMovementNoise(playerRoot, playerHumanoid)
+	if not movementNoise or noise.intensity >= movementNoise.intensity then
+		return noise
+	end
+
+	noise.intensity = movementNoise.intensity
+	noise.visualIntensity = math.max(tonumber(noise.visualIntensity) or 0, movementNoise.visualIntensity)
+	noise.radius = math.max(tonumber(noise.radius) or 0, movementNoise.radius)
+	noise.movementState = movementNoise.movementState
+	return noise
 end
 
 local function getNoiseReaction(report)
@@ -150,6 +207,31 @@ local function setChaseSpeeds(reaction, intensity)
 	chaseMaxSpeed = math.max(chaseBaseSpeed, maxSpeed + (urgency * 0.6))
 end
 
+local function broadcastCoopPulse(sourcePlayer, rootPosition: Vector3, noise)
+	local visualIntensity = math.clamp(tonumber(noise.visualIntensity) or 0, 0, 5)
+	local radius = math.clamp(tonumber(noise.radius) or 0, 0, 64)
+	if visualIntensity < COOP_VISUAL_THRESHOLD or radius <= 0 then
+		return
+	end
+
+	local payload = {
+		type = "CoopEcholocationPulse",
+		sourceUserId = sourcePlayer.UserId,
+		position = rootPosition,
+		intensity = visualIntensity,
+		radius = radius,
+		movementState = noise.movementState,
+		hasVoice = noise.hasVoice,
+		voiceVolume = math.clamp(tonumber(noise.voiceVolume) or 0, 0, 1),
+	}
+
+	for _, otherPlayer in ipairs(Players:GetPlayers()) do
+		if otherPlayer ~= sourcePlayer then
+			pulseEvent:FireClient(otherPlayer, payload)
+		end
+	end
+end
+
 local function getSpawnCFrame()
 	local spawnMarker = workspace:FindFirstChild("spawn")
 	if spawnMarker and spawnMarker:IsA("BasePart") then
@@ -162,6 +244,15 @@ local function getSpawnCFrame()
 	end
 
 	return CFrame.new(0, 5, 0)
+end
+
+local function waitForCharacter(player, timeoutSeconds: number): Model?
+	local deadline = os.clock() + timeoutSeconds
+	while player.Parent and not player.Character and os.clock() < deadline do
+		task.wait(0.1)
+	end
+
+	return player.Character
 end
 
 local function updatePlayerNoiseState(player, noise)
@@ -207,22 +298,30 @@ local function resetPlayerAfterCatch(player)
 	task.delay(1.4, function()
 		if not player.Parent then return end
 		player:LoadCharacter()
-		local character = player.Character or player.CharacterAdded:Wait()
+		local character = waitForCharacter(player, MONSTER_CONFIG.RESPAWN_CHARACTER_TIMEOUT)
 		task.wait(0.15)
 		if character and character.Parent then
 			character:PivotTo(getSpawnCFrame())
+		else
+			warn("MonsterAI: player character did not respawn before timeout.")
 		end
 	end)
 end
 
 local function catchPlayer(player)
+	if player:GetAttribute("Escaped") == true then
+		return
+	end
+
 	local now = os.clock()
 	if caughtCooldowns[player] and now - caughtCooldowns[player] < CATCH_COOLDOWN then
 		return
 	end
 
 	caughtCooldowns[player] = now
-	caughtEvent:FireClient(player)
+	caughtEvent:FireClient(player, {
+		outcome = "death",
+	})
 
 	local character = player.Character
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
@@ -277,7 +376,7 @@ local function updateDynamicSpeed(destination: Vector3, isChasing: boolean)
 end
 
 local function setupPatrol()
-	local map = workspace:FindFirstChild("Prototype_Map")
+	local map = getActiveMap()
 	if not map then return end
 	-- Prefer dedicated patrol point parts
 	for _, child in pairs(map:GetDescendants()) do
@@ -355,18 +454,32 @@ local function followPath(destination, interruptFn, isChasing)
 end
 
 pulseEvent.OnServerEvent:Connect(function(player, report)
-	local noise = normalizeNoiseReport(report)
+	if player:GetAttribute("Escaped") == true then
+		return
+	end
+
+	local now = os.clock()
+	if now - (lastNoiseReportAt[player] or 0) < NOISE_REPORT_MIN_INTERVAL then
+		return
+	end
+	lastNoiseReportAt[player] = now
+
+	local char = player.Character
+	local playerRoot = char and char:FindFirstChild("HumanoidRootPart")
+	local playerHumanoid = char and char:FindFirstChildOfClass("Humanoid")
+	if not (playerRoot and playerRoot:IsA("BasePart") and playerHumanoid) then return end
+
+	local noise = applyServerMovementFloor(normalizeNoiseReport(report), playerRoot, playerHumanoid)
 	updatePlayerNoiseState(player, noise)
+
+	broadcastCoopPulse(player, playerRoot.Position, noise)
 
 	local reaction = getNoiseReaction(noise)
 	local hearThreshold = reaction.hearThreshold or HEAR_THRESHOLD
 	if noise.intensity < hearThreshold then return end
 
-	local char = player.Character
-	if not char or not char:FindFirstChild("HumanoidRootPart") then return end
-
-	lastNoisePosition = char.HumanoidRootPart.Position
-	lastNoiseTime = os.clock()
+	lastNoisePosition = playerRoot.Position
+	lastNoiseTime = now
 	lastNoiseDecay = reaction.decay or SENSE_DECAY_TIME
 	setChaseSpeeds(reaction, noise.intensity)
 end)
@@ -374,6 +487,7 @@ end)
 Players.PlayerRemoving:Connect(function(player)
 	playerNoiseState[player] = nil
 	caughtCooldowns[player] = nil
+	lastNoiseReportAt[player] = nil
 end)
 
 serverNoiseEvent.Event:Connect(function(report)
@@ -445,6 +559,10 @@ task.spawn(function()
 		end
 
 		for _, player in ipairs(Players:GetPlayers()) do
+			if player:GetAttribute("Escaped") == true then
+				continue
+			end
+
 			local character = player.Character
 			local playerRoot = character and character:FindFirstChild("HumanoidRootPart")
 			local playerHumanoid = character and character:FindFirstChildOfClass("Humanoid")

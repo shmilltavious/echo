@@ -2,11 +2,29 @@
 print("Hello world, from client!")
 
 local StarterGui = game:GetService("StarterGui")
-local clientFolder = game.StarterPlayer.StarterPlayerScripts.Client
-local Menu = require(clientFolder:WaitForChild("Menu", 5))
-local SphereVisuals = require(clientFolder:WaitForChild("SphereVisuals", 5))
-local ObjectiveClient = require(clientFolder:WaitForChild("ObjectiveClient", 5))
-local CameraEffects = require(clientFolder:WaitForChild("CameraEffects", 5))
+local clientFolder = script
+
+local function requireClientModule(name: string)
+	local module = clientFolder:WaitForChild(name, 5)
+	if not module then
+		warn(name .. " failed to load: module missing")
+		return nil
+	end
+
+	local ok, result = pcall(require, module)
+	if not ok then
+		warn(name .. " failed to load: " .. tostring(result))
+		return nil
+	end
+
+	return result
+end
+
+local Menu = requireClientModule("Menu")
+local SphereVisuals = requireClientModule("SphereVisuals")
+local ObjectiveClient = requireClientModule("ObjectiveClient")
+local CameraEffects = requireClientModule("CameraEffects")
+local AudioFeedback = requireClientModule("AudioFeedback")
 
 local function hidePlayerList()
 	pcall(function()
@@ -45,6 +63,12 @@ if not CameraEffects then
 	warn("CameraEffects failed to load")
 else
 	print("CameraEffects loaded")
+end
+
+if not AudioFeedback then
+	warn("AudioFeedback failed to load")
+else
+	print("AudioFeedback loaded")
 end
 
 print("MVP client systems initialized!")
