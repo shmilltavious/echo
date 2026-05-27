@@ -21,12 +21,19 @@ local function requireServerModule(name: string)
 end
 
 local ObjectiveSystem = requireServerModule("ObjectiveSystem")
+local MapEcholocationSetup = requireServerModule("MapEcholocationSetup")
 
 if not ObjectiveSystem then
 	warn("ObjectiveSystem failed to load")
 else
 	print("ObjectiveSystem loaded")
 	ObjectiveSystem.init()
+end
+
+if not MapEcholocationSetup then
+	warn("MapEcholocationSetup failed to load")
+else
+	MapEcholocationSetup.init()
 end
 
 print("MVP server systems initialized!")

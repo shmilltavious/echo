@@ -3,6 +3,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
+local MonsterVisualController = require(script.Parent.MonsterVisualController)
 local MONSTER_CONFIG = Constants.MONSTER_AI
 local REMOTE_LIMITS = Constants.REMOTE_LIMITS
 
@@ -60,6 +61,12 @@ humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
 humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
 humanoid:SetStateEnabled(Enum.HumanoidStateType.GettingUp, false)
 
+local monsterVisual = MonsterVisualController.start({
+	driverRoot = rootPart,
+	hideDriverModel = monsterModel,
+	hiddenPrewarm = true,
+})
+
 local pulseEvent = ReplicatedStorage:FindFirstChild("EcholocationPulse")
 if not pulseEvent then
 	pulseEvent = Instance.new("RemoteEvent")
@@ -99,6 +106,14 @@ local cornerSlowUntil = 0
 local playerNoiseState = {}
 local caughtCooldowns = {}
 local lastNoiseReportAt = {}
+local chaseRoarUntil = 0
+
+local function telegraphNewChase(now: number)
+	chaseRoarUntil = math.max(chaseRoarUntil, now + 0.85)
+	if monsterVisual then
+		monsterVisual.playRoar()
+	end
+end
 
 local function normalizeNoiseReport(report)
 	if typeof(report) == "number" then
@@ -319,6 +334,9 @@ local function catchPlayer(player)
 	end
 
 	caughtCooldowns[player] = now
+	if monsterVisual then
+		monsterVisual.playAttack()
+	end
 	caughtEvent:FireClient(player, {
 		outcome = "death",
 	})
@@ -414,6 +432,9 @@ end
 -- Move toward a single position, polling every 0.1s.
 -- Returns true when reached, false on timeout or interrupt.
 local function moveTo(position, interruptFn, isChasing)
+	if monsterVisual then
+		monsterVisual.playRun()
+	end
 	humanoid:MoveTo(position)
 	local startTime = os.clock()
 	repeat
@@ -478,10 +499,14 @@ pulseEvent.OnServerEvent:Connect(function(player, report)
 	local hearThreshold = reaction.hearThreshold or HEAR_THRESHOLD
 	if noise.intensity < hearThreshold then return end
 
+	local wasInvestigating = lastNoisePosition ~= nil and (now - lastNoiseTime < lastNoiseDecay)
 	lastNoisePosition = playerRoot.Position
 	lastNoiseTime = now
 	lastNoiseDecay = reaction.decay or SENSE_DECAY_TIME
 	setChaseSpeeds(reaction, noise.intensity)
+	if not wasInvestigating then
+		telegraphNewChase(now)
+	end
 end)
 
 Players.PlayerRemoving:Connect(function(player)
@@ -496,10 +521,15 @@ serverNoiseEvent.Event:Connect(function(report)
 	local position = typeof(report) == "table" and report.position
 	if typeof(position) ~= "Vector3" then return end
 
+	local now = os.clock()
+	local wasInvestigating = lastNoisePosition ~= nil and (now - lastNoiseTime < lastNoiseDecay)
 	lastNoisePosition = position
-	lastNoiseTime = os.clock()
+	lastNoiseTime = now
 	lastNoiseDecay = tonumber(report.decay) or reaction.decay or SENSE_DECAY_TIME
 	setChaseSpeeds(reaction, noise.intensity)
+	if not wasInvestigating then
+		telegraphNewChase(now)
+	end
 end)
 
 setupPatrol()
@@ -516,8 +546,17 @@ task.spawn(function()
 		if isInvestigating then
 			local target = lastNoisePosition
 
+			if os.clock() < chaseRoarUntil then
+				humanoid:MoveTo(rootPart.Position)
+				task.wait(0.1)
+				continue
+			end
+
 			if (rootPart.Position - target).Magnitude < WAYPOINT_REACH_DIST then
 				lastNoisePosition = nil
+				if monsterVisual then
+					monsterVisual.playLook()
+				end
 			else
 				followPath(target, function()
 					-- Abort if scent decayed or a newer noise position arrived
@@ -530,6 +569,9 @@ task.spawn(function()
 				humanoid.WalkSpeed = PATROL_SPEED
 				lastMoveDirection = nil
 				straightRunTime = 0
+				if monsterVisual then
+					monsterVisual.playIdle()
+				end
 			end
 		else
 			humanoid.WalkSpeed = PATROL_SPEED

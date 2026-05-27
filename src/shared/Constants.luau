@@ -64,7 +64,7 @@ Constants.OBJECTIVES = {
 	FUSE_BOX_CONNECTED_NAME = "Fuse Box (Connected)",
 	PROTOTYPE_MAP_NAME = "Prototype_Map",
 	GAMEPLAY_ITEMS_FOLDER_NAME = "GameplayItems",
-	AUTHORED_MAP_NAMES = { "Spaceship_Map", "Map" },
+	AUTHORED_MAP_NAMES = { "New Map", "Spaceship_Map", "Map" },
 	ESCAPE_DOOR_POSITION = Vector3.new(158.5, 6, 39),
 	ESCAPE_DOOR_SIZE = Vector3.new(7, 10, 1),
 	ESCAPE_DOOR_OPEN_OFFSET = Vector3.new(0, 12, 0),
@@ -93,6 +93,13 @@ Constants.SOUNDS = {
 	decoyThrow = "rbxassetid://9112854440",
 	decoyShatter = "rbxassetid://9112854440",
 	ambientLandmark = "rbxassetid://9112854440",
+	monster = {
+		idle = "",
+		look = "",
+		roar = "",
+		run = "",
+		attack = "",
+	},
 }
 
 Constants.REMOTE_LIMITS = {
