@@ -1,5 +1,3 @@
-local RunService = game:GetService("RunService")
-
 local MonsterGroundLock = {}
 
 local DEFAULT_CONTACT_BONE_SUFFIXES = {
@@ -64,6 +62,7 @@ function MonsterGroundLock.start(config)
 	if #contactBones == 0 then
 		warn("MonsterGroundLock: no contact bones found; ground lock disabled.")
 		return {
+			step = function() end,
 			stop = function() end,
 			suppressDownwardCorrection = function() end,
 		}
@@ -75,22 +74,23 @@ function MonsterGroundLock.start(config)
 
 	local lastFloorY = nil
 	local suppressDownwardCorrectionUntil = 0
-	local connection
+	local stopped = false
 
 	local controller = {}
 
 	function controller.stop()
-		if connection then
-			connection:Disconnect()
-			connection = nil
-		end
+		stopped = true
 	end
 
 	function controller.suppressDownwardCorrection(durationSeconds: number)
 		suppressDownwardCorrectionUntil = math.max(suppressDownwardCorrectionUntil, os.clock() + durationSeconds)
 	end
 
-	connection = RunService.Heartbeat:Connect(function(deltaTime)
+	function controller.step(deltaTime: number)
+		if stopped then
+			return
+		end
+
 		if not rig.Parent or not visualPart.Parent then
 			controller.stop()
 			return
@@ -123,7 +123,7 @@ function MonsterGroundLock.start(config)
 		local maxCorrection = maxCorrectionPerSecond * deltaTime
 		local smoothedCorrection = math.clamp(correction, -maxCorrection, maxCorrection)
 		visualPart.CFrame += Vector3.new(0, smoothedCorrection, 0)
-	end)
+	end
 
 	return controller
 end

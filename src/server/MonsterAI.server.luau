@@ -9,6 +9,9 @@ local REMOTE_LIMITS = Constants.REMOTE_LIMITS
 
 local PATROL_SPEED = MONSTER_CONFIG.PATROL_SPEED
 local CORNER_SPEED = MONSTER_CONFIG.CORNER_SPEED
+local COLLISION_HULL_SIZE = MONSTER_CONFIG.COLLISION_HULL_SIZE or Vector3.new(11.8, 7, 11.8)
+local PATH_AGENT_RADIUS = MONSTER_CONFIG.PATH_AGENT_RADIUS or 5.9
+local PATH_AGENT_HEIGHT = MONSTER_CONFIG.PATH_AGENT_HEIGHT or 7
 local STRAIGHT_ACCEL_DELAY = MONSTER_CONFIG.STRAIGHT_ACCEL_DELAY
 local STRAIGHT_ACCEL_TIME = MONSTER_CONFIG.STRAIGHT_ACCEL_TIME
 local SENSE_DECAY_TIME = MONSTER_CONFIG.SENSE_DECAY_TIME
@@ -20,6 +23,7 @@ local TOUCH_ATTACK_RANGE = MONSTER_CONFIG.TOUCH_ATTACK_RANGE
 local STILL_SURVIVE_TIME = MONSTER_CONFIG.STILL_SURVIVE_TIME
 local CATCH_COOLDOWN = MONSTER_CONFIG.CATCH_COOLDOWN
 local COOP_VISUAL_THRESHOLD = MONSTER_CONFIG.COOP_VISUAL_THRESHOLD
+local DIRECT_MOVE_CLEARANCE_DISTANCE = MONSTER_CONFIG.DIRECT_MOVE_CLEARANCE_DISTANCE or 6
 local NOISE_REPORT_MIN_INTERVAL = REMOTE_LIMITS.NOISE_REPORT_MIN_INTERVAL
 local AUTHORED_MAP_NAMES = Constants.OBJECTIVES.AUTHORED_MAP_NAMES
 local VALID_MOVEMENT_STATES = {
@@ -31,14 +35,52 @@ local VALID_MOVEMENT_STATES = {
 	decoy = true,
 }
 local NOISE_REACTIONS = MONSTER_CONFIG.NOISE_REACTIONS
+local monsterContainer: Model? = nil
 
-local function findMonsterModel(): Model?
-	local found = workspace:FindFirstChild("Monster") or workspace:WaitForChild("Rig", 5)
-	if found and found:IsA("Model") then
-		return found
+local function findHumanoidDriverModel(container: Model): Model?
+	if container:FindFirstChildOfClass("Humanoid") and container:FindFirstChild("HumanoidRootPart") then
+		return container
 	end
 
-	warn("MonsterAI disabled: expected Workspace.Monster or Workspace.Rig model.")
+	for _, descendant in ipairs(container:GetDescendants()) do
+		if descendant:IsA("Model")
+			and descendant:FindFirstChildOfClass("Humanoid")
+			and descendant:FindFirstChild("HumanoidRootPart")
+		then
+			return descendant
+		end
+	end
+
+	return nil
+end
+
+local function resolveHumanoidDriverModel(container: Model): Model?
+	local deadline = os.clock() + 5
+	repeat
+		local driverModel = findHumanoidDriverModel(container)
+		if driverModel then
+			return driverModel
+		end
+		task.wait(0.1)
+	until os.clock() > deadline
+
+	return nil
+end
+
+local function findMonsterModel(): Model?
+	local found = workspace:WaitForChild("Monster", 5)
+	if found and found:IsA("Model") then
+		monsterContainer = found
+		local driverModel = resolveHumanoidDriverModel(found)
+		if driverModel then
+			if driverModel ~= found then
+				print(string.format("MonsterAI: using nested Humanoid driver %s inside game.Workspace.Monster", driverModel:GetFullName()))
+			end
+			return driverModel
+		end
+	end
+
+	warn("MonsterAI disabled: expected game.Workspace.Monster to be or contain a Humanoid driver model.")
 	return nil
 end
 
@@ -64,8 +106,14 @@ humanoid:SetStateEnabled(Enum.HumanoidStateType.GettingUp, false)
 local monsterVisual = MonsterVisualController.start({
 	driverRoot = rootPart,
 	hideDriverModel = monsterModel,
+	rig = monsterContainer,
+	visualPartName = "geometry_0",
 	hiddenPrewarm = true,
 })
+local collisionHull = (monsterContainer or monsterModel):WaitForChild("MonsterCollisionHull", 3)
+if not (collisionHull and collisionHull:IsA("BasePart")) then
+	warn("MonsterAI: MonsterCollisionHull was not ready; wall avoidance may be less reliable.")
+end
 
 local pulseEvent = ReplicatedStorage:FindFirstChild("EcholocationPulse")
 if not pulseEvent then
@@ -211,6 +259,59 @@ local function horizontalDirection(fromPosition: Vector3, toPosition: Vector3): 
 		return nil
 	end
 	return delta.Unit
+end
+
+local function getHorizontalDelta(fromPosition: Vector3, toPosition: Vector3): Vector3
+	return Vector3.new(toPosition.X - fromPosition.X, 0, toPosition.Z - fromPosition.Z)
+end
+
+local function setMonsterFacing(position: Vector3)
+	if not monsterVisual then
+		return
+	end
+
+	local direction = horizontalDirection(rootPart.Position, position)
+	if direction then
+		monsterVisual.setFacingDirection(direction)
+	end
+end
+
+local function setMonsterLocomotion(state: string)
+	if monsterVisual then
+		monsterVisual.setLocomotionState(state)
+	end
+end
+
+local function getClearanceRaycastParams(): RaycastParams
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local ignored = { monsterModel }
+	if monsterVisual and monsterVisual.rig then
+		table.insert(ignored, monsterVisual.rig)
+	end
+	params.FilterDescendantsInstances = ignored
+	params.RespectCanCollide = true
+	return params
+end
+
+local function hasHullClearanceTo(destination: Vector3): boolean
+	local delta = getHorizontalDelta(rootPart.Position, destination)
+	local distance = delta.Magnitude
+	if distance <= 0.05 then
+		return true
+	end
+
+	local direction = delta.Unit
+	local origin = CFrame.lookAt(rootPart.Position, rootPart.Position + direction)
+	local maxDistance = if DIRECT_MOVE_CLEARANCE_DISTANCE > 0 then math.max(distance, DIRECT_MOVE_CLEARANCE_DISTANCE) else distance
+	local result = workspace:Blockcast(origin, COLLISION_HULL_SIZE, direction * maxDistance, getClearanceRaycastParams())
+	return result == nil
+end
+
+local function stopMonsterMotion()
+	humanoid:Move(Vector3.zero, false)
+	humanoid:MoveTo(rootPart.Position)
+	rootPart.AssemblyLinearVelocity = Vector3.new(0, rootPart.AssemblyLinearVelocity.Y, 0)
 end
 
 local function setChaseSpeeds(reaction, intensity)
@@ -415,8 +516,8 @@ end
 
 local function computePath(destination)
 	local path = PathfindingService:CreatePath({
-		AgentRadius = 2,
-		AgentHeight = 6,
+		AgentRadius = PATH_AGENT_RADIUS,
+		AgentHeight = PATH_AGENT_HEIGHT,
 		AgentCanJump = false,
 		WaypointSpacing = 4,
 	})
@@ -432,17 +533,49 @@ end
 -- Move toward a single position, polling every 0.1s.
 -- Returns true when reached, false on timeout or interrupt.
 local function moveTo(position, interruptFn, isChasing)
-	if monsterVisual then
-		monsterVisual.playRun()
-	end
-	humanoid:MoveTo(position)
+	setMonsterFacing(position)
+	setMonsterLocomotion(if isChasing then "Run" else "Walk")
 	local startTime = os.clock()
+	local lastProgressTime = startTime
+	local lastDistance = getHorizontalDelta(rootPart.Position, position).Magnitude
 	repeat
-		task.wait(0.1)
+		task.wait(0.05)
+		setMonsterFacing(position)
+		setMonsterLocomotion(if isChasing then "Run" else "Walk")
 		updateDynamicSpeed(position, isChasing == true)
-		if interruptFn and interruptFn() then return false end
-		if (rootPart.Position - position).Magnitude < WAYPOINT_REACH_DIST then return true end
+		if interruptFn and interruptFn() then
+			stopMonsterMotion()
+			return false
+		end
+		if not hasHullClearanceTo(position) then
+			stopMonsterMotion()
+			setMonsterLocomotion("Idle")
+			return false
+		end
+		local distance = getHorizontalDelta(rootPart.Position, position).Magnitude
+		if distance < WAYPOINT_REACH_DIST then
+			stopMonsterMotion()
+			return true
+		end
+		local direction = getHorizontalDelta(rootPart.Position, position).Unit
+		local currentVelocity = rootPart.AssemblyLinearVelocity
+		rootPart.AssemblyLinearVelocity = Vector3.new(
+			direction.X * humanoid.WalkSpeed,
+			currentVelocity.Y,
+			direction.Z * humanoid.WalkSpeed
+		)
+		humanoid:Move(direction, false)
+		if distance < lastDistance - 0.25 then
+			lastDistance = distance
+			lastProgressTime = os.clock()
+		elseif os.clock() - lastProgressTime > 1.4 then
+			stopMonsterMotion()
+			setMonsterLocomotion("Idle")
+			return false
+		end
 	until os.clock() - startTime > WAYPOINT_TIMEOUT
+	stopMonsterMotion()
+	setMonsterLocomotion("Idle")
 	return false
 end
 
@@ -452,11 +585,19 @@ end
 local function followPath(destination, interruptFn, isChasing)
 	local waypoints = computePath(destination)
 	if not waypoints or #waypoints < 2 then
-		moveTo(destination, interruptFn, isChasing)
-		return
+		if hasHullClearanceTo(destination) then
+			return moveTo(destination, interruptFn, isChasing)
+		end
+
+		stopMonsterMotion()
+		setMonsterLocomotion("Idle")
+		return false
 	end
 	for i = 2, #waypoints do
-		if interruptFn and interruptFn() then return end
+		if interruptFn and interruptFn() then
+			stopMonsterMotion()
+			return false
+		end
 		local wp = waypoints[i]
 		if wp.Action == Enum.PathWaypointAction.Jump then
 			humanoid.Jump = true
@@ -469,9 +610,16 @@ local function followPath(destination, interruptFn, isChasing)
 			straightRunTime = 0
 		end
 
+		if not hasHullClearanceTo(wp.Position) then
+			stopMonsterMotion()
+			setMonsterLocomotion("Idle")
+			return false
+		end
+
 		local reached = moveTo(wp.Position, interruptFn, isChasing)
-		if not reached then return end
+		if not reached then return false end
 	end
+	return true
 end
 
 pulseEvent.OnServerEvent:Connect(function(player, report)
@@ -547,47 +695,54 @@ task.spawn(function()
 			local target = lastNoisePosition
 
 			if os.clock() < chaseRoarUntil then
-				humanoid:MoveTo(rootPart.Position)
+				stopMonsterMotion()
+				setMonsterLocomotion("Idle")
 				task.wait(0.1)
 				continue
 			end
 
 			if (rootPart.Position - target).Magnitude < WAYPOINT_REACH_DIST then
 				lastNoisePosition = nil
-				if monsterVisual then
-					monsterVisual.playLook()
-				end
+				setMonsterLocomotion("Idle")
+				if monsterVisual then monsterVisual.playLook() end
 			else
-				followPath(target, function()
+				local reached = followPath(target, function()
 					-- Abort if scent decayed or a newer noise position arrived
 					return os.clock() - lastNoiseTime >= lastNoiseDecay
 						or lastNoisePosition ~= target
 				end, true)
+				if not reached then
+					task.wait(0.25)
+				end
 			end
 
 			if not lastNoisePosition or os.clock() - lastNoiseTime >= lastNoiseDecay then
 				humanoid.WalkSpeed = PATROL_SPEED
 				lastMoveDirection = nil
 				straightRunTime = 0
-				if monsterVisual then
-					monsterVisual.playIdle()
-				end
+				setMonsterLocomotion("Idle")
 			end
 		else
 			humanoid.WalkSpeed = PATROL_SPEED
 
 			if #patrolWaypoints > 0 then
 				local target = patrolWaypoints[currentWaypointIndex]
-				followPath(target, function()
+				local reached = followPath(target, function()
 					return lastNoisePosition ~= nil and os.clock() - lastNoiseTime < lastNoiseDecay
 				end, false)
+				if not reached then
+					task.wait(0.25)
+				end
 				currentWaypointIndex = (currentWaypointIndex % #patrolWaypoints) + 1
 			else
 				-- No waypoints: wander to a random nearby position using pathfinding
 				local offset = Vector3.new(math.random(-30, 30), 0, math.random(-30, 30))
-				followPath(rootPart.Position + offset, function()
+				local reached = followPath(rootPart.Position + offset, function()
 					return lastNoisePosition ~= nil and os.clock() - lastNoiseTime < lastNoiseDecay
 				end, false)
+				if not reached then
+					task.wait(0.25)
+				end
 			end
 		end
 	end

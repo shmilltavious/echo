@@ -12,8 +12,17 @@ local FADE_TIME = 0.15
 local ACTION_START_DOWNWARD_SUPPRESSION_SECONDS = 0.2
 local HIDDEN_PREWARM_ACTIONS = { "Look", "Roar" }
 local HIDDEN_PREWARM_SECONDS = 0.45
-local FOLLOW_DEADZONE = 0.05
-local DRIVER_MOVING_THRESHOLD = 0.18
+local VISUAL_YAW_OFFSET = math.rad(90)
+local FOLLOW_RESPONSIVENESS = 20
+local TURN_RESPONSIVENESS = 10
+local MAX_VISUAL_CORRECTION_PER_SECOND = 120
+local MAX_VISUAL_FOLLOW_LAG = 0.25
+local MOVE_START_SPEED = 0.8
+local MOVE_STOP_SPEED = 0.35
+local MOVEMENT_STATE_SETTLE_SECONDS = 0.12
+local LARGE_DISPLACEMENT_SNAP_DISTANCE = 24
+local FACING_SPEED_THRESHOLD = 0.2
+local DRIVER_VELOCITY_FACING_THRESHOLD = 0.35
 
 local ANIMATIONS = {
 	Idle = {
@@ -35,6 +44,12 @@ local ANIMATIONS = {
 		assetId = "rbxassetid://117522782092613",
 		looped = true,
 		soundKey = "run",
+	},
+	Walk = {
+		assetId = "rbxassetid://117522782092613",
+		looped = true,
+		soundKey = "run",
+		playbackSpeed = 0.55,
 	},
 	Attack = {
 		assetId = "rbxassetid://74427646472939",
@@ -92,6 +107,28 @@ local function getFlatForward(cframe: CFrame): Vector3
 	return flat.Unit
 end
 
+local function getFlatDirection(vector: Vector3, fallback: Vector3): Vector3
+	local flat = Vector3.new(vector.X, 0, vector.Z)
+	if flat.Magnitude < 0.01 then
+		return fallback
+	end
+
+	return flat.Unit
+end
+
+local function getPlanarPosition(position: Vector3): Vector3
+	return Vector3.new(position.X, 0, position.Z)
+end
+
+local function getSmoothingAlpha(responsiveness: number, deltaTime: number): number
+	return 1 - math.exp(-responsiveness * math.max(deltaTime, 0))
+end
+
+local function buildVisualCFrame(position: Vector3, forward: Vector3, yawOffset: number): CFrame
+	local safeForward = getFlatDirection(forward, Vector3.new(0, 0, -1))
+	return CFrame.lookAt(position, position + safeForward) * CFrame.Angles(0, yawOffset, 0)
+end
+
 local function getVisualParts(rig: Model): { BasePart }
 	local parts = {}
 	for _, descendant in ipairs(rig:GetDescendants()) do
@@ -101,6 +138,49 @@ local function getVisualParts(rig: Model): { BasePart }
 	end
 
 	return parts
+end
+
+local function getVisualFootprintSize(rig: Model, visualPart: BasePart, hiddenDriverModel: Model?): Vector3
+	local minPosition: Vector3? = nil
+	local maxPosition: Vector3? = nil
+
+	for _, part in ipairs(getVisualParts(rig)) do
+		if part ~= visualPart and part.Name == "MonsterCollisionHull" then
+			continue
+		end
+		if hiddenDriverModel and part:IsDescendantOf(hiddenDriverModel) then
+			continue
+		end
+
+		local halfSize = part.Size * 0.5
+		for _, x in ipairs({ -1, 1 }) do
+			for _, y in ipairs({ -1, 1 }) do
+				for _, z in ipairs({ -1, 1 }) do
+					local corner = part.CFrame:PointToWorldSpace(Vector3.new(halfSize.X * x, halfSize.Y * y, halfSize.Z * z))
+					minPosition = if minPosition
+						then Vector3.new(
+							math.min(minPosition.X, corner.X),
+							math.min(minPosition.Y, corner.Y),
+							math.min(minPosition.Z, corner.Z)
+						)
+						else corner
+					maxPosition = if maxPosition
+						then Vector3.new(
+							math.max(maxPosition.X, corner.X),
+							math.max(maxPosition.Y, corner.Y),
+							math.max(maxPosition.Z, corner.Z)
+						)
+						else corner
+				end
+			end
+		end
+	end
+
+	if minPosition and maxPosition then
+		return maxPosition - minPosition
+	end
+
+	return visualPart.Size
 end
 
 local function hideDriverModel(model: Model)
@@ -168,7 +248,10 @@ function MonsterVisualController.start(config)
 
 	config = config or {}
 
-	local rig = workspace:WaitForChild(config.rigName or RIG_NAME, 10)
+	local rig = config.rig
+	if not rig then
+		rig = workspace:WaitForChild(config.rigName or RIG_NAME, 10)
+	end
 	if not (rig and rig:IsA("Model")) then
 		warn("MonsterVisualController disabled: expected Workspace." .. (config.rigName or RIG_NAME))
 		return nil
@@ -191,6 +274,9 @@ function MonsterVisualController.start(config)
 	visualPart.CanCollide = false
 	visualPart.CanTouch = false
 	visualPart.CanQuery = true
+	if visualPart:GetAttribute("MonsterVisualYawOffsetDegrees") == nil then
+		visualPart:SetAttribute("MonsterVisualYawOffsetDegrees", math.deg(VISUAL_YAW_OFFSET))
+	end
 
 	local visualParts = getVisualParts(rig)
 	local tracks = loadTracks(animator)
@@ -216,6 +302,18 @@ function MonsterVisualController.start(config)
 		maxCorrectionPerSecond = 18,
 		maxFloorRisePerFrame = 2,
 	})
+	local visualBoundsSize = getVisualFootprintSize(rig, visualPart, config.hideDriverModel)
+	local hullSize = Constants.MONSTER_AI.COLLISION_HULL_SIZE or Vector3.new(11.8, 7, 11.8)
+	print(string.format(
+		"Monster visual footprint: bounds=%s hull=%s yawOffset=%.1f",
+		tostring(visualBoundsSize),
+		tostring(hullSize),
+		visualPart:GetAttribute("MonsterVisualYawOffsetDegrees") or math.deg(VISUAL_YAW_OFFSET)
+	))
+	local footprintTolerance = 0.05
+	if visualBoundsSize.X > hullSize.X + footprintTolerance or visualBoundsSize.Z > hullSize.Z + footprintTolerance then
+		warn("MonsterVisualController: visual footprint exceeds MonsterCollisionHull footprint; wall clipping may still be visible.")
+	end
 
 	local controller = {
 		rig = rig,
@@ -229,6 +327,23 @@ function MonsterVisualController.start(config)
 	local followConnection: RBXScriptConnection? = nil
 	local destroyed = false
 	local lastDriverPosition: Vector3? = nil
+	local lastFacingForward = getFlatForward(visualPart.CFrame * CFrame.Angles(0, -VISUAL_YAW_OFFSET, 0))
+	local hasFollowedDriver = false
+	local isMoving = false
+	local locomotionState = "Idle"
+	local pendingMoving: boolean? = nil
+	local pendingMovingSince = 0
+	local lastKnownDriverSpeed = 0
+	local authoritativeFacingDirection: Vector3? = nil
+
+	local function getVisualYawOffset(): number
+		local degrees = visualPart:GetAttribute("MonsterVisualYawOffsetDegrees")
+		if typeof(degrees) == "number" then
+			return math.rad(degrees)
+		end
+
+		return VISUAL_YAW_OFFSET
+	end
 
 	local function stopLoopSoundsExcept(soundKey: string?)
 		for key, sound in pairs(sounds) do
@@ -270,7 +385,21 @@ function MonsterVisualController.start(config)
 		end
 	end
 
-	local function playAction(actionName: string, forceReplay: boolean?)
+	local playAction
+
+	local function getDesiredLoopAction(): string
+		return locomotionState
+	end
+
+	local function playDesiredLoop()
+		if currentOneShotName then
+			return
+		end
+
+		playAction(getDesiredLoopAction())
+	end
+
+	function playAction(actionName: string, forceReplay: boolean?)
 		local track = tracks[actionName]
 		if not track then
 			return
@@ -289,10 +418,43 @@ function MonsterVisualController.start(config)
 			groundLock.suppressDownwardCorrection(ACTION_START_DOWNWARD_SUPPRESSION_SECONDS)
 		end
 		track:Play(FADE_TIME)
+		local animationInfo = ANIMATIONS[actionName]
+		track:AdjustSpeed((animationInfo and animationInfo.playbackSpeed) or 1)
 		playSoundForAction(actionName)
 	end
 
-	local function updateFollow()
+	local function updateMovementState(speed: number, now: number)
+		local targetMoving = isMoving
+		if isMoving then
+			if speed <= MOVE_STOP_SPEED then
+				targetMoving = false
+			end
+		elseif speed >= MOVE_START_SPEED then
+			targetMoving = true
+		end
+
+		if targetMoving == isMoving then
+			pendingMoving = nil
+			return
+		end
+
+		if pendingMoving ~= targetMoving then
+			pendingMoving = targetMoving
+			pendingMovingSince = now
+			return
+		end
+
+		if now - pendingMovingSince < MOVEMENT_STATE_SETTLE_SECONDS then
+			return
+		end
+
+		isMoving = targetMoving
+		locomotionState = if isMoving then "Run" else "Idle"
+		pendingMoving = nil
+		playDesiredLoop()
+	end
+
+	local function updateFollow(deltaTime: number)
 		local driverRoot = controller.driverRoot
 		if not (driverRoot and driverRoot.Parent and visualPart.Parent) then
 			return
@@ -300,40 +462,108 @@ function MonsterVisualController.start(config)
 
 		local currentPosition = visualPart.Position
 		local driverPosition = driverRoot.Position
-		local followPosition = Vector3.new(driverPosition.X, currentPosition.Y, driverPosition.Z)
-		local forward = getFlatForward(driverRoot.CFrame)
-		local nextCFrame = CFrame.lookAt(followPosition, followPosition + forward)
-
-		if (Vector3.new(currentPosition.X, 0, currentPosition.Z) - Vector3.new(driverPosition.X, 0, driverPosition.Z)).Magnitude > FOLLOW_DEADZONE then
-			visualPart.CFrame = nextCFrame
-		else
-			visualPart.CFrame = CFrame.lookAt(currentPosition, currentPosition + forward)
-		end
-
-		local driverMoved = false
+		local driverDelta = Vector3.zero
+		local driverSpeed = Vector3.new(driverRoot.AssemblyLinearVelocity.X, 0, driverRoot.AssemblyLinearVelocity.Z).Magnitude
 		if lastDriverPosition then
-			local delta = Vector3.new(driverPosition.X - lastDriverPosition.X, 0, driverPosition.Z - lastDriverPosition.Z).Magnitude
-			driverMoved = delta > DRIVER_MOVING_THRESHOLD
-		end
-		lastDriverPosition = driverPosition
-
-		if not currentOneShotName then
-			if driverMoved then
-				playAction("Run")
-			else
-				playAction("Idle")
+			driverDelta = Vector3.new(driverPosition.X - lastDriverPosition.X, 0, driverPosition.Z - lastDriverPosition.Z)
+			if deltaTime > 0 then
+				driverSpeed = driverDelta.Magnitude / deltaTime
 			end
 		end
+		lastKnownDriverSpeed = driverSpeed
+		lastDriverPosition = driverPosition
+
+		local desiredForward = lastFacingForward
+		if authoritativeFacingDirection then
+			desiredForward = authoritativeFacingDirection
+		elseif driverDelta.Magnitude >= FACING_SPEED_THRESHOLD then
+			desiredForward = driverDelta.Unit
+		else
+			local velocity = Vector3.new(driverRoot.AssemblyLinearVelocity.X, 0, driverRoot.AssemblyLinearVelocity.Z)
+			if velocity.Magnitude >= DRIVER_VELOCITY_FACING_THRESHOLD then
+				desiredForward = velocity.Unit
+			elseif not hasFollowedDriver then
+				desiredForward = getFlatForward(driverRoot.CFrame)
+			end
+		end
+
+		local currentPlanarPosition = getPlanarPosition(currentPosition)
+		local driverPlanarPosition = getPlanarPosition(driverPosition)
+		local planarDistance = (currentPlanarPosition - driverPlanarPosition).Magnitude
+		local followPosition
+		if not hasFollowedDriver or planarDistance >= LARGE_DISPLACEMENT_SNAP_DISTANCE then
+			followPosition = Vector3.new(driverPosition.X, currentPosition.Y, driverPosition.Z)
+			hasFollowedDriver = true
+		else
+			local followAlpha = getSmoothingAlpha(FOLLOW_RESPONSIVENESS, deltaTime)
+			local planarCorrection = Vector3.new(
+				(driverPosition.X - currentPosition.X) * followAlpha,
+				0,
+				(driverPosition.Z - currentPosition.Z) * followAlpha
+			)
+			local maxCorrection = MAX_VISUAL_CORRECTION_PER_SECOND * deltaTime
+			if planarCorrection.Magnitude > maxCorrection and maxCorrection > 0 then
+				planarCorrection = planarCorrection.Unit * maxCorrection
+			end
+			followPosition = Vector3.new(
+				currentPosition.X + planarCorrection.X,
+				currentPosition.Y,
+				currentPosition.Z + planarCorrection.Z
+			)
+			local remainingOffset = Vector3.new(driverPosition.X - followPosition.X, 0, driverPosition.Z - followPosition.Z)
+			if remainingOffset.Magnitude > MAX_VISUAL_FOLLOW_LAG then
+				local clampedPlanarPosition = Vector3.new(driverPosition.X, 0, driverPosition.Z)
+					- (remainingOffset.Unit * MAX_VISUAL_FOLLOW_LAG)
+				followPosition = Vector3.new(clampedPlanarPosition.X, followPosition.Y, clampedPlanarPosition.Z)
+			end
+		end
+
+		local turnAlpha = getSmoothingAlpha(TURN_RESPONSIVENESS, deltaTime)
+		if lastFacingForward:Dot(desiredForward) < -0.98 then
+			lastFacingForward = desiredForward
+		else
+			lastFacingForward = getFlatDirection(lastFacingForward:Lerp(desiredForward, turnAlpha), desiredForward)
+		end
+
+		visualPart.CFrame = buildVisualCFrame(followPosition, lastFacingForward, getVisualYawOffset())
+		groundLock.step(deltaTime)
+		updateMovementState(lastKnownDriverSpeed, os.clock())
 	end
 
 	function controller.setDriver(driverRoot: BasePart?)
 		controller.driverRoot = driverRoot
 		lastDriverPosition = driverRoot and driverRoot.Position or nil
+		hasFollowedDriver = false
+		pendingMoving = nil
+		lastKnownDriverSpeed = 0
+		if driverRoot then
+			lastFacingForward = getFlatForward(driverRoot.CFrame)
+		end
+	end
+
+	function controller.setFacingDirection(direction: Vector3?)
+		if typeof(direction) ~= "Vector3" then
+			authoritativeFacingDirection = nil
+			return
+		end
+
+		authoritativeFacingDirection = getFlatDirection(direction, lastFacingForward)
+	end
+
+	function controller.setLocomotionState(state: string)
+		if state ~= "Idle" and state ~= "Walk" and state ~= "Run" then
+			return
+		end
+
+		locomotionState = state
+		isMoving = state ~= "Idle"
+		pendingMoving = nil
+		playDesiredLoop()
 	end
 
 	function controller.playIdle()
 		currentOneShotName = nil
-		playAction("Idle")
+		controller.setLocomotionState("Idle")
 	end
 
 	function controller.playLook()
@@ -346,7 +576,7 @@ function MonsterVisualController.start(config)
 
 	function controller.playRun()
 		if not currentOneShotName then
-			playAction("Run")
+			controller.setLocomotionState("Run")
 		end
 	end
 
@@ -382,7 +612,7 @@ function MonsterVisualController.start(config)
 					currentOneShotName = nil
 					currentActionName = nil
 					currentTrack = nil
-					controller.playIdle()
+					playDesiredLoop()
 				end
 			end)
 		end
