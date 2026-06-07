@@ -13,6 +13,11 @@ local player = Players.LocalPlayer
 local movementSpeed = 0
 local micVolume = 0
 local audioAnalyzer = nil
+local voiceEnabled = false
+local voiceInputAvailable = false
+local rawMicLevel = 0
+local silentVoiceWarningShown = false
+local voiceSilenceStartedAt = nil
 local activePulseSphere = nil
 local initialized = false
 local isCrouching = false
@@ -61,6 +66,27 @@ end
 
 function InputHandler.getNoiseInfo()
 	return currentNoise
+end
+
+function InputHandler.getVoiceDiagnostics()
+	return {
+		voiceEnabled = voiceEnabled,
+		voiceInputAvailable = voiceInputAvailable,
+		rawMicLevel = rawMicLevel,
+		micVolume = micVolume,
+		hasVoice = currentNoise.hasVoice,
+		monsterRisk = currentNoise.monsterRisk,
+	}
+end
+
+local function updateNoiseDebugAttributes()
+	player:SetAttribute("EcholocationVoiceEnabled", voiceEnabled)
+	player:SetAttribute("EcholocationVoiceInputAvailable", voiceInputAvailable)
+	player:SetAttribute("EcholocationRawMicLevel", rawMicLevel)
+	player:SetAttribute("EcholocationMicVolume", micVolume)
+	player:SetAttribute("EcholocationHasVoice", currentNoise.hasVoice)
+	player:SetAttribute("EcholocationMonsterRisk", currentNoise.monsterRisk)
+	player:SetAttribute("EcholocationMovementState", currentNoise.movementState)
 end
 
 local function setHumanoidSpeed(humanoid: Humanoid)
@@ -135,9 +161,12 @@ local function setupVoiceInput()
 	end)
 
 	if not (success and isVoiceEnabled) then
+		voiceEnabled = false
+		voiceInputAvailable = false
 		warn("Spatial Voice is not available or enabled for this player. Movement echolocation remains active.")
 		return
 	end
+	voiceEnabled = true
 
 	local audioInput = Instance.new("AudioDeviceInput")
 	audioInput.Player = player
@@ -150,6 +179,7 @@ local function setupVoiceInput()
 	wire.SourceInstance = audioInput
 	wire.TargetInstance = audioAnalyzer
 	wire.Parent = player
+	voiceInputAvailable = true
 end
 
 local function setupMovementKeys()
@@ -206,12 +236,25 @@ function InputHandler.init()
 		end
 
 		if audioAnalyzer then
-			micVolume = calculateMicVolume(audioAnalyzer.RmsLevel)
+			rawMicLevel = audioAnalyzer.RmsLevel
+			micVolume = calculateMicVolume(rawMicLevel)
 		else
+			rawMicLevel = 0
 			micVolume = 0
 		end
 
 		calculateNoise(humanoid)
+		updateNoiseDebugAttributes()
+
+		if voiceEnabled and voiceInputAvailable and rawMicLevel <= MIC_NOISE_FLOOR then
+			voiceSilenceStartedAt = voiceSilenceStartedAt or os.clock()
+			if not silentVoiceWarningShown and os.clock() - voiceSilenceStartedAt >= 8 then
+				silentVoiceWarningShown = true
+				warn("Spatial Voice is enabled, but echolocation microphone input is reading silence. Movement noise remains active.")
+			end
+		else
+			voiceSilenceStartedAt = nil
+		end
 
 		if rootPart then
 			updatePulseSphere(rootPart)
@@ -227,6 +270,7 @@ function InputHandler.init()
 				movementState = currentNoise.movementState,
 				hasVoice = currentNoise.hasVoice,
 				voiceVolume = currentNoise.voiceVolume,
+				position = rootPart.Position,
 			})
 		end
 	end)

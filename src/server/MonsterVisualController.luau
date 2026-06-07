@@ -8,11 +8,17 @@ local MonsterVisualController = {}
 
 local RIG_NAME = "rigging (1)"
 local VISUAL_PART_NAME = "geometry_0"
-local FADE_TIME = 0.15
+local LOOP_FADE_TIME = 0.35
+local ACTION_FADE_TIME = 0.25
+local ATTACK_FADE_TIME = 0.12
+local ONE_SHOT_EXIT_FADE_TIME = 0.3
+local LOCOMOTION_INTERRUPT_FADE_TIME = 0.18
+local EMERGENCY_FADE_TIME = 0.05
+local MIN_ONE_SHOT_RESTART_SECONDS = 0.35
 local ACTION_START_DOWNWARD_SUPPRESSION_SECONDS = 0.2
 local HIDDEN_PREWARM_ACTIONS = { "Look", "Roar" }
 local HIDDEN_PREWARM_SECONDS = 0.45
-local VISUAL_YAW_OFFSET = math.rad(90)
+local VISUAL_YAW_OFFSET = math.rad(-90)
 local FOLLOW_RESPONSIVENESS = 20
 local TURN_RESPONSIVENESS = 10
 local MAX_VISUAL_CORRECTION_PER_SECOND = 120
@@ -23,38 +29,59 @@ local MOVEMENT_STATE_SETTLE_SECONDS = 0.12
 local LARGE_DISPLACEMENT_SNAP_DISTANCE = 24
 local FACING_SPEED_THRESHOLD = 0.2
 local DRIVER_VELOCITY_FACING_THRESHOLD = 0.35
+local OLD_VISUAL_YAW_OFFSET_DEGREES = 90
+local CALIBRATED_VISUAL_YAW_OFFSET_DEGREES = -90
+local DRIFT_COMPENSATION_RESPONSIVENESS = 34
+local MAX_DRIFT_COMPENSATION = 5
+local DRIFT_REEXPORT_WARN_THRESHOLD = 1.25
+local RUN_SPEED_REFERENCE = 13
+local WALK_SPEED_REFERENCE = 6.5
+local PLAYBACK_SPEED_RESPONSIVENESS = 8
+local ROOT_BONE_NAME_PRIORITY = {
+	"root",
+	"armature",
+	"hips",
+	"pelvis",
+	"spine",
+}
 
 local ANIMATIONS = {
 	Idle = {
-		assetId = "rbxassetid://93982960068097",
+		assetId = Constants.MONSTER_ANIMATIONS.Idle,
 		looped = true,
 		soundKey = "idle",
+		priority = Enum.AnimationPriority.Movement,
 	},
 	Look = {
-		assetId = "rbxassetid://106914673591637",
+		assetId = Constants.MONSTER_ANIMATIONS.Look,
 		looped = false,
 		soundKey = "look",
+		priority = Enum.AnimationPriority.Action,
 	},
 	Roar = {
-		assetId = "rbxassetid://110729878275185",
+		assetId = Constants.MONSTER_ANIMATIONS.Roar,
 		looped = false,
 		soundKey = "roar",
+		priority = Enum.AnimationPriority.Action,
 	},
 	Run = {
-		assetId = "rbxassetid://117522782092613",
+		assetId = Constants.MONSTER_ANIMATIONS.Run,
 		looped = true,
 		soundKey = "run",
+		priority = Enum.AnimationPriority.Movement,
 	},
 	Walk = {
-		assetId = "rbxassetid://117522782092613",
+		assetId = Constants.MONSTER_ANIMATIONS.Walk,
 		looped = true,
 		soundKey = "run",
 		playbackSpeed = 0.55,
+		priority = Enum.AnimationPriority.Movement,
 	},
 	Attack = {
-		assetId = "rbxassetid://74427646472939",
+		assetId = Constants.MONSTER_ANIMATIONS.Attack,
 		looped = false,
 		soundKey = "attack",
+		priority = Enum.AnimationPriority.Action4,
 	},
 }
 
@@ -129,6 +156,10 @@ local function buildVisualCFrame(position: Vector3, forward: Vector3, yawOffset:
 	return CFrame.lookAt(position, position + safeForward) * CFrame.Angles(0, yawOffset, 0)
 end
 
+local function getRigRenderedForward(cframe: CFrame, fallback: Vector3): Vector3
+	return getFlatDirection(-cframe.RightVector, fallback)
+end
+
 local function getVisualParts(rig: Model): { BasePart }
 	local parts = {}
 	for _, descendant in ipairs(rig:GetDescendants()) do
@@ -138,6 +169,61 @@ local function getVisualParts(rig: Model): { BasePart }
 	end
 
 	return parts
+end
+
+local function getRigBones(rig: Model): { Bone }
+	local bones = {}
+	for _, descendant in ipairs(rig:GetDescendants()) do
+		if descendant:IsA("Bone") then
+			table.insert(bones, descendant)
+		end
+	end
+
+	return bones
+end
+
+local function getBoneNameScore(name: string): number
+	local lowered = string.lower(name)
+	for index, pattern in ipairs(ROOT_BONE_NAME_PRIORITY) do
+		if lowered == pattern then
+			return index
+		end
+	end
+	for index, pattern in ipairs(ROOT_BONE_NAME_PRIORITY) do
+		if string.find(lowered, pattern, 1, true) then
+			return index + #ROOT_BONE_NAME_PRIORITY
+		end
+	end
+
+	return math.huge
+end
+
+local function getDriftProbeBones(rig: Model): { Bone }
+	local bones = getRigBones(rig)
+	local bestBone: Bone? = nil
+	local bestScore = math.huge
+	local topLevelBones = {}
+
+	for _, bone in ipairs(bones) do
+		if not bone.Parent or not bone.Parent:IsA("Bone") then
+			table.insert(topLevelBones, bone)
+		end
+
+		local score = getBoneNameScore(bone.Name)
+		if score < bestScore then
+			bestScore = score
+			bestBone = bone
+		end
+	end
+
+	if bestBone and bestScore < math.huge then
+		return { bestBone }
+	end
+	if #topLevelBones > 0 then
+		return topLevelBones
+	end
+
+	return {}
 end
 
 local function getVisualFootprintSize(rig: Model, visualPart: BasePart, hiddenDriverModel: Model?): Vector3
@@ -207,6 +293,7 @@ local function loadTracks(animator: Animator)
 		local track = animator:LoadAnimation(animation)
 		track.Name = name
 		track.Looped = animationInfo.looped
+		track.Priority = animationInfo.priority or Enum.AnimationPriority.Movement
 		tracks[name] = track
 	end
 
@@ -274,11 +361,18 @@ function MonsterVisualController.start(config)
 	visualPart.CanCollide = false
 	visualPart.CanTouch = false
 	visualPart.CanQuery = true
-	if visualPart:GetAttribute("MonsterVisualYawOffsetDegrees") == nil then
-		visualPart:SetAttribute("MonsterVisualYawOffsetDegrees", math.deg(VISUAL_YAW_OFFSET))
+	local yawOffsetDegrees = visualPart:GetAttribute("MonsterVisualYawOffsetDegrees")
+	if yawOffsetDegrees == nil
+		or (typeof(yawOffsetDegrees) == "number" and math.abs(yawOffsetDegrees - OLD_VISUAL_YAW_OFFSET_DEGREES) < 0.01)
+	then
+		visualPart:SetAttribute("MonsterVisualYawOffsetDegrees", CALIBRATED_VISUAL_YAW_OFFSET_DEGREES)
+	end
+	if visualPart:GetAttribute("MonsterVisualDynamicPlaybackEnabled") == nil then
+		visualPart:SetAttribute("MonsterVisualDynamicPlaybackEnabled", false)
 	end
 
 	local visualParts = getVisualParts(rig)
+	local driftProbeBones = getDriftProbeBones(rig)
 	local tracks = loadTracks(animator)
 	local sounds = {}
 	for _, animationInfo in pairs(ANIMATIONS) do
@@ -314,6 +408,11 @@ function MonsterVisualController.start(config)
 	if visualBoundsSize.X > hullSize.X + footprintTolerance or visualBoundsSize.Z > hullSize.Z + footprintTolerance then
 		warn("MonsterVisualController: visual footprint exceeds MonsterCollisionHull footprint; wall clipping may still be visible.")
 	end
+	if #driftProbeBones == 0 then
+		warn("MonsterVisualController: no root/top-level bones found; animation drift compensation will use anchor-only diagnostics.")
+	else
+		visualPart:SetAttribute("MonsterVisualDriftProbe", driftProbeBones[1].Name)
+	end
 
 	local controller = {
 		rig = rig,
@@ -324,6 +423,7 @@ function MonsterVisualController.start(config)
 	local currentTrack: AnimationTrack? = nil
 	local currentActionName: string? = nil
 	local currentOneShotName: string? = nil
+	local currentOneShotStartedAt = 0
 	local followConnection: RBXScriptConnection? = nil
 	local destroyed = false
 	local lastDriverPosition: Vector3? = nil
@@ -335,6 +435,12 @@ function MonsterVisualController.start(config)
 	local pendingMovingSince = 0
 	local lastKnownDriverSpeed = 0
 	local authoritativeFacingDirection: Vector3? = nil
+	local driftBaselineLocal: Vector3? = nil
+	local driftCompensationWorld = Vector3.zero
+	local lastDriftMagnitude = 0
+	local maxDriftByAction = {}
+	local warnedDriftByAction = {}
+	local currentPlaybackSpeed = 1
 
 	local function getVisualYawOffset(): number
 		local degrees = visualPart:GetAttribute("MonsterVisualYawOffsetDegrees")
@@ -343,6 +449,138 @@ function MonsterVisualController.start(config)
 		end
 
 		return VISUAL_YAW_OFFSET
+	end
+
+	local function setDebugAttribute(name: string, value)
+		local attributeName = "MonsterVisual_" .. name
+		visualPart:SetAttribute(attributeName, value)
+		rig:SetAttribute(attributeName, value)
+
+		local monsterContainer = workspace:FindFirstChild("Monster")
+		if monsterContainer then
+			monsterContainer:SetAttribute(attributeName, value)
+		end
+	end
+
+	local function setForwardDebug(moveForward: Vector3, renderedCFrame: CFrame)
+		local safeMoveForward = getFlatDirection(moveForward, lastFacingForward)
+		local renderForward = getRigRenderedForward(renderedCFrame, safeMoveForward)
+		setDebugAttribute("MoveForward", safeMoveForward)
+		setDebugAttribute("RenderForward", renderForward)
+		setDebugAttribute("ForwardDot", math.clamp(renderForward:Dot(safeMoveForward), -1, 1))
+	end
+
+	local function getTrackFadeTime(actionName: string): number
+		if actionName == "Attack" then
+			return ATTACK_FADE_TIME
+		end
+
+		local animationInfo = ANIMATIONS[actionName]
+		if animationInfo and animationInfo.looped then
+			return LOOP_FADE_TIME
+		end
+
+		return ACTION_FADE_TIME
+	end
+
+	local function getTrackPlaybackSpeed(actionName: string): number
+		local animationInfo = ANIMATIONS[actionName]
+		local baseSpeed = (animationInfo and animationInfo.playbackSpeed) or 1
+		if visualPart:GetAttribute("MonsterVisualDynamicPlaybackEnabled") == false then
+			return baseSpeed
+		end
+
+		if actionName == "Run" then
+			return math.clamp(lastKnownDriverSpeed / RUN_SPEED_REFERENCE, 0.75, 1.35)
+		elseif actionName == "Walk" then
+			local speedScale = math.clamp(lastKnownDriverSpeed / WALK_SPEED_REFERENCE, 0.75, 1.25)
+			return math.clamp(baseSpeed * speedScale, 0.45, 0.75)
+		end
+
+		return baseSpeed
+	end
+
+	local function getProbeCenterLocal(): Vector3?
+		if #driftProbeBones == 0 then
+			return Vector3.zero
+		end
+
+		local sum = Vector3.zero
+		local count = 0
+		for _, bone in ipairs(driftProbeBones) do
+			if bone.Parent then
+				sum += visualPart.CFrame:PointToObjectSpace(bone.WorldCFrame.Position)
+				count += 1
+			end
+		end
+
+		if count == 0 then
+			return nil
+		end
+
+		return sum / count
+	end
+
+	local function updateDriftCompensation(baseCFrame: CFrame, deltaTime: number)
+		local compensationEnabled = visualPart:GetAttribute("MonsterVisualDriftCompensationEnabled")
+		if compensationEnabled == false or #driftProbeBones == 0 then
+			driftCompensationWorld = Vector3.zero
+			lastDriftMagnitude = 0
+			setDebugAttribute("DriftMagnitude", 0)
+			setDebugAttribute("DriftCompensationOffset", Vector3.zero)
+			return baseCFrame
+		end
+
+		local centerLocal = getProbeCenterLocal()
+		if not centerLocal then
+			return baseCFrame + driftCompensationWorld
+		end
+		if not driftBaselineLocal then
+			driftBaselineLocal = centerLocal
+		end
+
+		local localDrift = Vector3.new(
+			centerLocal.X - driftBaselineLocal.X,
+			0,
+			centerLocal.Z - driftBaselineLocal.Z
+		)
+		local rawMagnitude = localDrift.Magnitude
+		lastDriftMagnitude = rawMagnitude
+
+		local targetCompensation = -baseCFrame:VectorToWorldSpace(localDrift)
+		targetCompensation = Vector3.new(targetCompensation.X, 0, targetCompensation.Z)
+		if targetCompensation.Magnitude > MAX_DRIFT_COMPENSATION then
+			targetCompensation = targetCompensation.Unit * MAX_DRIFT_COMPENSATION
+		end
+
+		local alpha = getSmoothingAlpha(DRIFT_COMPENSATION_RESPONSIVENESS, deltaTime)
+		driftCompensationWorld = driftCompensationWorld:Lerp(targetCompensation, alpha)
+		driftCompensationWorld = Vector3.new(driftCompensationWorld.X, 0, driftCompensationWorld.Z)
+
+		local actionName = currentActionName or "None"
+		maxDriftByAction[actionName] = math.max(maxDriftByAction[actionName] or 0, rawMagnitude)
+		setDebugAttribute("DriftMagnitude", rawMagnitude)
+		setDebugAttribute("DriftCompensationOffset", driftCompensationWorld)
+		setDebugAttribute("MaxDriftMagnitude", maxDriftByAction[actionName] or rawMagnitude)
+
+		if rawMagnitude >= DRIFT_REEXPORT_WARN_THRESHOLD and not warnedDriftByAction[actionName] then
+			warn(string.format(
+				"MonsterVisualController: %s animation has %.2f studs of planar root drift after code compensation; re-export in-place if visible sliding remains.",
+				actionName,
+				rawMagnitude
+			))
+			warnedDriftByAction[actionName] = true
+		end
+
+		return baseCFrame + driftCompensationWorld
+	end
+
+	local function resetDriftBaseline()
+		driftBaselineLocal = getProbeCenterLocal()
+		driftCompensationWorld = Vector3.zero
+		lastDriftMagnitude = 0
+		setDebugAttribute("DriftMagnitude", 0)
+		setDebugAttribute("DriftCompensationOffset", Vector3.zero)
 	end
 
 	local function stopLoopSoundsExcept(soundKey: string?)
@@ -381,7 +619,7 @@ function MonsterVisualController.start(config)
 
 	local function stopCurrent(fadeTime: number?)
 		if currentTrack and currentTrack.IsPlaying then
-			currentTrack:Stop(fadeTime or FADE_TIME)
+			currentTrack:Stop(fadeTime or EMERGENCY_FADE_TIME)
 		end
 	end
 
@@ -391,36 +629,91 @@ function MonsterVisualController.start(config)
 		return locomotionState
 	end
 
-	local function playDesiredLoop()
+	local function playDesiredLoop(fadeTimeOverride: number?)
 		if currentOneShotName then
 			return
 		end
 
-		playAction(getDesiredLoopAction())
+		playAction(getDesiredLoopAction(), false, fadeTimeOverride)
 	end
 
-	function playAction(actionName: string, forceReplay: boolean?)
+	local function interruptOneShotForLocomotion(fadeTime: number?): boolean
+		if not currentOneShotName or currentOneShotName == "Attack" then
+			return false
+		end
+
+		local interruptedOneShot = currentOneShotName
+		stopCurrent(fadeTime or LOCOMOTION_INTERRUPT_FADE_TIME)
+		currentTrack = nil
+		currentActionName = nil
+		currentOneShotName = nil
+		currentOneShotStartedAt = 0
+		resetDriftBaseline()
+		setDebugAttribute("InterruptedOneShot", interruptedOneShot)
+		playDesiredLoop(fadeTime or LOCOMOTION_INTERRUPT_FADE_TIME)
+		return true
+	end
+
+	function playAction(actionName: string, forceReplay: boolean?, fadeTimeOverride: number?)
 		local track = tracks[actionName]
 		if not track then
 			return
 		end
 
-		if currentActionName == actionName and track.IsPlaying and not forceReplay then
+		if currentActionName == actionName and currentTrack and currentTrack.IsPlaying and not forceReplay then
 			return
 		end
+		if currentOneShotName == actionName and currentTrack and currentTrack.IsPlaying and forceReplay then
+			if os.clock() - currentOneShotStartedAt < MIN_ONE_SHOT_RESTART_SECONDS then
+				return
+			end
+		end
 
-		stopCurrent(FADE_TIME)
+		local animationInfo = ANIMATIONS[actionName]
+		local fadeTime = fadeTimeOverride or getTrackFadeTime(actionName)
+		local playbackSpeed = getTrackPlaybackSpeed(actionName)
+		if currentTrack and currentTrack.IsPlaying and animationInfo and currentActionName then
+			local currentInfo = ANIMATIONS[currentActionName]
+			if currentInfo
+				and currentInfo.looped
+				and animationInfo.looped
+				and currentInfo.assetId == animationInfo.assetId
+				and not forceReplay
+			then
+				currentActionName = actionName
+				currentOneShotName = nil
+				currentPlaybackSpeed = playbackSpeed
+				currentTrack:AdjustSpeed(playbackSpeed)
+				playSoundForAction(actionName)
+				setDebugAttribute("CurrentAnimation", actionName)
+				setDebugAttribute("TransitionTarget", actionName)
+				setDebugAttribute("ActiveLocomotionState", locomotionState)
+				return
+			end
+		end
+
+		stopCurrent(fadeTime)
+		local previousActionName = currentActionName
+		local previousWasLoop = previousActionName and ANIMATIONS[previousActionName] and ANIMATIONS[previousActionName].looped
 		currentTrack = track
 		currentActionName = actionName
 		currentOneShotName = if track.Looped then nil else actionName
+		if currentOneShotName then
+			currentOneShotStartedAt = os.clock()
+		end
+		if previousWasLoop ~= animationInfo.looped then
+			resetDriftBaseline()
+		end
 
 		if actionName ~= "Idle" then
 			groundLock.suppressDownwardCorrection(ACTION_START_DOWNWARD_SUPPRESSION_SECONDS)
 		end
-		track:Play(FADE_TIME)
-		local animationInfo = ANIMATIONS[actionName]
-		track:AdjustSpeed((animationInfo and animationInfo.playbackSpeed) or 1)
+		currentPlaybackSpeed = playbackSpeed
+		track:Play(fadeTime, 1, playbackSpeed)
 		playSoundForAction(actionName)
+		setDebugAttribute("CurrentAnimation", actionName)
+		setDebugAttribute("TransitionTarget", actionName)
+		setDebugAttribute("ActiveLocomotionState", locomotionState)
 	end
 
 	local function updateMovementState(speed: number, now: number)
@@ -460,7 +753,7 @@ function MonsterVisualController.start(config)
 			return
 		end
 
-		local currentPosition = visualPart.Position
+		local currentPosition = visualPart.Position - driftCompensationWorld
 		local driverPosition = driverRoot.Position
 		local driverDelta = Vector3.zero
 		local driverSpeed = Vector3.new(driverRoot.AssemblyLinearVelocity.X, 0, driverRoot.AssemblyLinearVelocity.Z).Magnitude
@@ -525,9 +818,21 @@ function MonsterVisualController.start(config)
 			lastFacingForward = getFlatDirection(lastFacingForward:Lerp(desiredForward, turnAlpha), desiredForward)
 		end
 
-		visualPart.CFrame = buildVisualCFrame(followPosition, lastFacingForward, getVisualYawOffset())
+		local baseCFrame = buildVisualCFrame(followPosition, lastFacingForward, getVisualYawOffset())
+		visualPart.CFrame = baseCFrame + driftCompensationWorld
+		visualPart.CFrame = updateDriftCompensation(baseCFrame, deltaTime)
+		setForwardDebug(lastFacingForward, visualPart.CFrame)
 		groundLock.step(deltaTime)
 		updateMovementState(lastKnownDriverSpeed, os.clock())
+		if currentTrack and currentTrack.IsPlaying and currentActionName then
+			local animationInfo = ANIMATIONS[currentActionName]
+			if animationInfo and animationInfo.looped then
+				local targetSpeed = getTrackPlaybackSpeed(currentActionName)
+				local speedAlpha = getSmoothingAlpha(PLAYBACK_SPEED_RESPONSIVENESS, deltaTime)
+				currentPlaybackSpeed += (targetSpeed - currentPlaybackSpeed) * speedAlpha
+				currentTrack:AdjustSpeed(currentPlaybackSpeed)
+			end
+		end
 	end
 
 	function controller.setDriver(driverRoot: BasePart?)
@@ -536,6 +841,7 @@ function MonsterVisualController.start(config)
 		hasFollowedDriver = false
 		pendingMoving = nil
 		lastKnownDriverSpeed = 0
+		driftCompensationWorld = Vector3.zero
 		if driverRoot then
 			lastFacingForward = getFlatForward(driverRoot.CFrame)
 		end
@@ -558,6 +864,11 @@ function MonsterVisualController.start(config)
 		locomotionState = state
 		isMoving = state ~= "Idle"
 		pendingMoving = nil
+		setDebugAttribute("ActiveLocomotionState", locomotionState)
+		if isMoving and interruptOneShotForLocomotion(LOCOMOTION_INTERRUPT_FADE_TIME) then
+			return
+		end
+
 		playDesiredLoop()
 	end
 
@@ -575,13 +886,43 @@ function MonsterVisualController.start(config)
 	end
 
 	function controller.playRun()
-		if not currentOneShotName then
-			controller.setLocomotionState("Run")
-		end
+		controller.setLocomotionState("Run")
 	end
 
 	function controller.playAttack()
 		playAction("Attack", true)
+	end
+
+	function controller.playWalk()
+		controller.setLocomotionState("Walk")
+	end
+
+	function controller.getAnimationDiagnostics()
+		return {
+			currentAnimation = currentActionName,
+			currentOneShot = currentOneShotName,
+			locomotionState = locomotionState,
+			driftMagnitude = lastDriftMagnitude,
+			driftCompensationOffset = driftCompensationWorld,
+			maxDriftByAction = table.clone(maxDriftByAction),
+			driftProbe = if #driftProbeBones > 0 then driftProbeBones[1].Name else "",
+			forwardDot = visualPart:GetAttribute("MonsterVisual_ForwardDot"),
+			moveForward = visualPart:GetAttribute("MonsterVisual_MoveForward"),
+			renderForward = visualPart:GetAttribute("MonsterVisual_RenderForward"),
+		}
+	end
+
+	function controller.resetAnimationDiagnostics(actionName: string?)
+		if typeof(actionName) == "string" then
+			maxDriftByAction[actionName] = 0
+			warnedDriftByAction[actionName] = nil
+		else
+			table.clear(maxDriftByAction)
+			table.clear(warnedDriftByAction)
+		end
+		lastDriftMagnitude = 0
+		setDebugAttribute("DriftMagnitude", 0)
+		setDebugAttribute("MaxDriftMagnitude", 0)
 	end
 
 	function controller.stop()
@@ -612,7 +953,7 @@ function MonsterVisualController.start(config)
 					currentOneShotName = nil
 					currentActionName = nil
 					currentTrack = nil
-					playDesiredLoop()
+					playDesiredLoop(ONE_SHOT_EXIT_FADE_TIME)
 				end
 			end)
 		end
@@ -623,6 +964,9 @@ function MonsterVisualController.start(config)
 	end
 
 	activeController = controller
+	driftBaselineLocal = getProbeCenterLocal()
+	setDebugAttribute("DriftProbe", if #driftProbeBones > 0 then driftProbeBones[1].Name else "")
+	setDebugAttribute("ActiveLocomotionState", locomotionState)
 	controller.playIdle()
 
 	task.spawn(function()
