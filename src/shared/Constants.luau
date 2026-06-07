@@ -64,7 +64,7 @@ Constants.OBJECTIVES = {
 	FUSE_BOX_CONNECTED_NAME = "Fuse Box (Connected)",
 	PROTOTYPE_MAP_NAME = "Prototype_Map",
 	GAMEPLAY_ITEMS_FOLDER_NAME = "GameplayItems",
-	AUTHORED_MAP_NAMES = { "Spaceship_Map", "Map" },
+	AUTHORED_MAP_NAMES = { "New Map", "Spaceship_Map", "Map" },
 	ESCAPE_DOOR_POSITION = Vector3.new(158.5, 6, 39),
 	ESCAPE_DOOR_SIZE = Vector3.new(7, 10, 1),
 	ESCAPE_DOOR_OPEN_OFFSET = Vector3.new(0, 12, 0),
@@ -93,6 +93,24 @@ Constants.SOUNDS = {
 	decoyThrow = "rbxassetid://9112854440",
 	decoyShatter = "rbxassetid://9112854440",
 	ambientLandmark = "rbxassetid://9112854440",
+	monster = {
+		idle = "",
+		look = "",
+		roar = "",
+		run = "",
+		attack = "",
+	},
+}
+
+Constants.MONSTER_ANIMATIONS = {
+	-- Replace Run after exporting Monster_Run_InPlace_Roblox from Blender.
+	-- Walk intentionally uses Run at reduced speed until a dedicated walk clip is imported.
+	Idle = "rbxassetid://93982960068097",
+	Look = "rbxassetid://106914673591637",
+	Roar = "rbxassetid://110729878275185",
+	Run = "rbxassetid://117522782092613",
+	Walk = "rbxassetid://117522782092613",
+	Attack = "rbxassetid://74427646472939",
 }
 
 Constants.REMOTE_LIMITS = {
@@ -106,6 +124,22 @@ Constants.REMOTE_LIMITS = {
 Constants.MONSTER_AI = {
 	PATROL_SPEED = 6.5,
 	CORNER_SPEED = 7.5,
+	COLLISION_HULL_SIZE = Vector3.new(11.8, 7, 11.8),
+	PATH_AGENT_RADIUS = 5.9,
+	PATH_AGENT_HEIGHT = 7,
+	NAV_AGENT_RADIUS = 3.4,
+	NAV_AGENT_HEIGHT = 7,
+	DIRECT_MOVE_CLEARANCE_DISTANCE = 6,
+	NOISE_TARGET_SAMPLE_RADII = { 7, 10, 14 },
+	NOISE_TARGET_SAMPLE_DIRECTIONS = 12,
+	REPATH_COOLDOWN = 0.35,
+	SIGNIFICANT_NOISE_MIN_INTERVAL = 0.07,
+	IDLE_NOISE_MIN_INTERVAL = 0.25,
+	APPROACH_TARGET_MAX_RING = 18,
+	PATH_DEBUG_ATTRIBUTES = true,
+	CLIENT_NOISE_MAX_SERVER_DISTANCE = 32,
+	CLIENT_NOISE_MAX_LAST_ACCEPTED_DISTANCE = 45,
+	CLIENT_NOISE_STALE_SERVER_HEIGHT = 40,
 	STRAIGHT_ACCEL_DELAY = 3.25,
 	STRAIGHT_ACCEL_TIME = 1.25,
 	SENSE_DECAY_TIME = 5,

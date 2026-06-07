@@ -28,7 +28,7 @@ local REMOTE_PULSE_FADE_TIME = 0.5
 local REMOTE_PULSE_HEIGHT = 2
 
 local REVEAL_TAGS = { "EcholocationReveal", "RevealTarget" }
-local AUTHORED_MAP_NAMES = { "Spaceship_Map", "Map" }
+local AUTHORED_MAP_NAMES = Constants.OBJECTIVES.AUTHORED_MAP_NAMES
 
 local objectiveColors = {
 	Keycard = Color3.fromRGB(95, 210, 255),
@@ -39,7 +39,16 @@ local objectiveColors = {
 	AudioLandmark = Color3.fromRGB(255, 140, 66),
 }
 
+local revealKindColors = {
+	Monster = Color3.fromRGB(255, 78, 66),
+}
+
 local function getRevealColor(part: BasePart): Color3
+	local revealKind = part:GetAttribute("RevealKind")
+	if typeof(revealKind) == "string" and revealKindColors[revealKind] then
+		return revealKindColors[revealKind]
+	end
+
 	local objectiveName = part:GetAttribute("ObjectiveName")
 	if typeof(objectiveName) == "string" and objectiveColors[objectiveName] then
 		return objectiveColors[objectiveName]
@@ -51,6 +60,7 @@ end
 local function isObjectiveLike(part: BasePart): boolean
 	return part:GetAttribute("ObjectiveName") ~= nil
 		or part:GetAttribute("EquipSlot") ~= nil
+		or part:GetAttribute("RevealKind") == "Monster"
 		or part.Name:find("Interact") ~= nil
 end
 
